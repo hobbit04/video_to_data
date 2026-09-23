@@ -487,9 +487,22 @@ To recover these numbers from the log, note that `Episode_Reward/<term>` is
    scale the gains with object mass. This is the only lever with an
    intervention behind it (19.2% -> 0.02% exceedance).
 6. ~~**C-1** (log lift ratio)~~ — done; `object_lift_ratio` is in the training log.
-7. A 1,000-iteration run — does the lift ratio move?
-8. **A-2** (enable `position_threshold=null`), then **D-1**, **D-2**, **D-3**.
-9. **D-4/D-5** — re-evaluate the curriculum length only after the above.
+7. ~~A 1,500-iteration run~~ — done, and the lift ratio did **not** move:
+   0.058 before, **0.057** after (8.6 mm raised against the reference's 153 mm),
+   with the config verified applied. `objAway` also rose to 0.16-0.59 against
+   0.04-0.08 in the 8 h run, i.e. the policy displaces the object past the 0.2 m
+   threshold more often without ever lifting it. Caveat: 1500 iterations is
+   2.7x fewer than the 8 h run and the curriculum shape differs, so this bounds
+   the effect of A-1 + B-1 rather than measuring it exactly.
+8. **Turn on `contact_wrench_support_reward`** — the paper's core reward, at
+   weight 0.0 in every run so far. The README zeroes it for monocular data as
+   too noisy, but measured on this reference after refinement and
+   de-penetration, 91.6% (right) / 84.8% (left) of contact points sit within
+   5 mm of the object surface, normals are all unit length, and the active
+   contact set flips only 0.1-0.2 links per frame. See
+   `train_tissue_box_wrench_1500.sh`.
+9. **A-2** (enable `position_threshold=null`), then **D-1**, **D-2**, **D-3**.
+10. **D-4/D-5** — re-evaluate the curriculum length only after the above.
 
 Steps 1–4 are configuration changes and added observability only, so the run
 remains a faithful CHORD reproduction. D-2 is the sole reward-function change
