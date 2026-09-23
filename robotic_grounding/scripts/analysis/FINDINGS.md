@@ -225,10 +225,45 @@ missing. It passes `stride=1`, because the default `stride=3` samples every
 third frame and can step over the deepest one. `SKIP_PREFLIGHT=1` overrides it
 deliberately.
 
-**Reducing the penetration itself is still open.** Options: more gsplat
-refinement (which moved it 2.11 → 1.25 cm on the right hand), a penetration
-penalty in the retargeting IK, or a watertight mesh so the refinement loss sees
-the real surface.
+**FIXED, with a flag that already existed.** `ego_recon_to_sharpa.py` ships
+`--surface_project`, which pushes MANO joint IK targets out of the object's OBB
+proxy before IK; the original retarget simply did not use it. No new penetration
+penalty was needed, and **reconstruction did not have to be re-run** — the
+loader output is cached and de-penetration happens at the retarget stage.
+
+| `--surface_margin` | max | mean | p90 | >2cm | >1cm | IK task error R/L |
+|---|---|---|---|---|---|---|
+| none (original) | **2.19** | 1.13 | 1.76 | **19/390** | 270/390 | 2.28 / 2.32 cm |
+| 0.000 | 1.48 | 0.89 | 1.39 | 0/390 | 207/390 | 2.34 / 2.40 cm |
+| **0.005 (default)** | **1.39** | 0.74 | 1.10 | **0/390** | 105/390 | 2.38 / 2.49 cm |
+| 0.010 | 1.36 | 0.67 | 1.04 | 0/390 | 57/390 | 2.45 / 2.57 cm |
+| 0.020 | 1.36 | 0.60 | 0.98 | 0/390 | 30/390 | 2.65 / 2.80 cm |
+
+The max saturates at 1.36 cm past 0.005 while the IK error keeps climbing, so
+0.005 — the shipped default — is the right setting. Contact fraction is
+unchanged at 77.2%. Both sequences were re-retargeted with it and the support
+surfaces regenerated; `tissue_box_refined` now scores **1.392 cm and passes**
+both gates (penetration, and the 300-step replay). `tissue_box_timing`, the
+un-refined control, improves 2.86 → 2.02 cm and still fails at the same margin
+— a measure of what the gsplat refinement is worth.
+
+**It does NOT unblock A-2, contrary to what this section previously claimed.**
+Re-measuring the zero-action noise floor on the de-penetrated sequence:
+
+| | penetration 2.19 cm | penetration 1.39 cm |
+|---|---|---|
+| p50 | 0.0313 | 0.0265 |
+| p90 | 0.0906 | 0.0968 |
+| p99 | 0.1095 | 0.1137 |
+| exceeding 0.078 m | 19.2% | **19.8%** |
+
+Unchanged. The hands are the cause — that much is established by intervention,
+since disabling hand-object collisions drops the deviation to 0.26 cm — but the
+penetration *depth* is not the knob that sets how hard they push. A grasp in
+contact at all exerts forces far above the 1.5 N the object controller produces
+at a 3 cm error, and the hands are position-controlled to reference wrist poses
+with no notion of holding gently. The only lever with an intervention behind it
+remains the controller gains (A-2).
 
 **Correction — the reset-ejection story was wrong, but the penetration is still
 on A-2's critical path.** Splitting the zero-action deviation by
@@ -434,16 +469,16 @@ To recover these numbers from the log, note that `Episode_Reward/<term>` is
 1. ~~**B-2** (surface the skip reason)~~ — done.
 2. ~~**A-1** (derive `var`)~~ — done; `var=null` in the training script.
 3. ~~**B-1 gate**~~ — done; the training script aborts on a failing sequence.
-4. **B-1 proper: get the penetration under 2 cm.** This is what blocks A-2.
-   The hands, commanded 2.19 cm inside the box, shove it 3-11 cm off the
-   reference and drown the failure signal; with hand-object collisions disabled
-   the same measurement reads 0.26 cm. Retuning the controller to `k=500, d=30`
-   also clears the floor (19.2% -> 0.02% exceedance) and is a usable stopgap,
-   but it out-muscles the hands rather than stopping them.
-5. **C-1** (log lift ratio) — without it you cannot tell whether a change helped.
-6. A 1,000-iteration run — does the lift ratio move?
-7. **A-2** (enable `position_threshold=null`), then **D-1**, **D-2**, **D-3**.
-8. **D-4/D-5** — re-evaluate the curriculum length only after the above.
+4. ~~**B-1 proper**~~ — done; `--surface_project --surface_margin 0.005` takes
+   `tissue_box_refined` to 1.392 cm and both gates pass. It did **not** unblock
+   A-2: the noise floor is unchanged at 19.8% exceedance.
+5. **A-2b: retune the virtual object controller** to `k=500, d=30`, or better,
+   scale the gains with object mass. This is the only lever with an
+   intervention behind it (19.2% -> 0.02% exceedance).
+6. **C-1** (log lift ratio) — without it you cannot tell whether a change helped.
+7. A 1,000-iteration run — does the lift ratio move?
+8. **A-2** (enable `position_threshold=null`), then **D-1**, **D-2**, **D-3**.
+9. **D-4/D-5** — re-evaluate the curriculum length only after the above.
 
 Steps 1–4 are configuration changes and added observability only, so the run
 remains a faithful CHORD reproduction. D-2 is the sole reward-function change

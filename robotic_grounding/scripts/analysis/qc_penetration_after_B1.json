@@ -1,0 +1,23 @@
+[
+  {
+    "sequence_id": "tissue_box_refined",
+    "hand_penetration_score": 1.392,
+    "hand_penetration_pass": true,
+    "hand_penetration_reason": "ok (max=1.39cm) [hull proxy unverified (non-watertight): tissue_box_refined.obj]",
+    "pass_all": true
+  },
+  {
+    "sequence_id": "tissue_box_simple",
+    "hand_penetration_score": NaN,
+    "hand_penetration_pass": false,
+    "hand_penetration_reason": "NOT MEASURED: no frames in the sequence",
+    "pass_all": false
+  },
+  {
+    "sequence_id": "tissue_box_timing",
+    "hand_penetration_score": 2.0197,
+    "hand_penetration_pass": false,
+    "hand_penetration_reason": "hand_object:2.0cm [hull proxy unverified (non-watertight): tissue_box_timing.obj]",
+    "pass_all": false
+  }
+]
