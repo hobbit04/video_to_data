@@ -1,0 +1,227 @@
+{
+  "generated": "2026-09-21T08:04:59Z",
+  "note": "No submissions scored yet. Written by aggregate/empty_payload.py.",
+  "tracks": [
+    {
+      "key": "track_1",
+      "title": "Track 1 - Reconstruction",
+      "short_title": "Track 1",
+      "metrics": [
+        {
+          "key": "cd_h_cm",
+          "display": "CD-H",
+          "unit": "cm",
+          "higher_is_better": false,
+          "competition": "v2d-challenge-track1-cd-h",
+          "available": true
+        },
+        {
+          "key": "cd_o_cm",
+          "display": "CD-O",
+          "unit": "cm",
+          "higher_is_better": false,
+          "competition": "v2d-challenge-track1-cd-o",
+          "available": true
+        },
+        {
+          "key": "acc_h_cm",
+          "display": "ACC-H",
+          "unit": "cm",
+          "higher_is_better": false,
+          "competition": "v2d-challenge-track1-acc-h",
+          "available": true
+        },
+        {
+          "key": "acc_o_cm",
+          "display": "ACC-O",
+          "unit": "cm",
+          "higher_is_better": false,
+          "competition": "v2d-challenge-track1-acc-o",
+          "available": true
+        },
+        {
+          "key": "interpenetration_cm",
+          "display": "PEN",
+          "unit": "cm",
+          "higher_is_better": false,
+          "competition": "v2d-challenge-track1-pen",
+          "available": false
+        }
+      ],
+      "rows": [],
+      "incomplete": []
+    },
+    {
+      "key": "track_2_tier1",
+      "title": "Track 2 - Robotic Grounding (Tier 1: clean multi-view)",
+      "short_title": "Track 2 \u00b7 Tier 1",
+      "metrics": [
+        {
+          "key": "add_auc",
+          "display": "AUC",
+          "unit": "",
+          "higher_is_better": true,
+          "competition": "v2d-challenge-track2-tier1-auc",
+          "available": true
+        },
+        {
+          "key": "spider_sr",
+          "display": "SP-SR",
+          "unit": "",
+          "higher_is_better": true,
+          "competition": "v2d-challenge-track2-tier1-sp-sr",
+          "available": true
+        },
+        {
+          "key": "maniptrans_sr",
+          "display": "MP-SR",
+          "unit": "",
+          "higher_is_better": true,
+          "competition": "v2d-challenge-track2-tier1-mp-sr",
+          "available": true
+        },
+        {
+          "key": "mppe_cm",
+          "display": "MPPE",
+          "unit": "cm",
+          "higher_is_better": false,
+          "competition": "v2d-challenge-track2-tier1-mppe",
+          "available": true
+        }
+      ],
+      "rows": [],
+      "incomplete": []
+    },
+    {
+      "key": "track_2_tier2",
+      "title": "Track 2 - Robotic Grounding (Tier 2: synthetic corruption)",
+      "short_title": "Track 2 \u00b7 Tier 2",
+      "metrics": [
+        {
+          "key": "add_auc",
+          "display": "AUC",
+          "unit": "",
+          "higher_is_better": true,
+          "competition": "v2d-challenge-track2-tier2-auc",
+          "available": true
+        },
+        {
+          "key": "spider_sr",
+          "display": "SP-SR",
+          "unit": "",
+          "higher_is_better": true,
+          "competition": "v2d-challenge-track2-tier2-sp-sr",
+          "available": true
+        },
+        {
+          "key": "maniptrans_sr",
+          "display": "MP-SR",
+          "unit": "",
+          "higher_is_better": true,
+          "competition": "v2d-challenge-track2-tier2-mp-sr",
+          "available": true
+        },
+        {
+          "key": "mppe_cm",
+          "display": "MPPE",
+          "unit": "cm",
+          "higher_is_better": false,
+          "competition": "v2d-challenge-track2-tier2-mppe",
+          "available": true
+        }
+      ],
+      "rows": [],
+      "incomplete": []
+    },
+    {
+      "key": "track_2_tier3",
+      "title": "Track 2 - Robotic Grounding (Tier 3: off-the-shelf reconstruction)",
+      "short_title": "Track 2 \u00b7 Tier 3",
+      "metrics": [
+        {
+          "key": "add_auc",
+          "display": "AUC",
+          "unit": "",
+          "higher_is_better": true,
+          "competition": "v2d-challenge-track2-tier3-auc",
+          "available": true
+        },
+        {
+          "key": "spider_sr",
+          "display": "SP-SR",
+          "unit": "",
+          "higher_is_better": true,
+          "competition": "v2d-challenge-track2-tier3-sp-sr",
+          "available": true
+        },
+        {
+          "key": "maniptrans_sr",
+          "display": "MP-SR",
+          "unit": "",
+          "higher_is_better": true,
+          "competition": "v2d-challenge-track2-tier3-mp-sr",
+          "available": true
+        },
+        {
+          "key": "mppe_cm",
+          "display": "MPPE",
+          "unit": "cm",
+          "higher_is_better": false,
+          "competition": "v2d-challenge-track2-tier3-mppe",
+          "available": true
+        }
+      ],
+      "rows": [],
+      "incomplete": []
+    },
+    {
+      "key": "track_3",
+      "title": "Track 3 - Egocentric",
+      "short_title": "Track 3",
+      "metrics": [
+        {
+          "key": "add_auc",
+          "display": "AUC",
+          "unit": "",
+          "higher_is_better": true,
+          "competition": "v2d-challenge-track3-auc",
+          "available": true
+        },
+        {
+          "key": "spider_sr",
+          "display": "SP-SR",
+          "unit": "",
+          "higher_is_better": true,
+          "competition": "v2d-challenge-track3-sp-sr",
+          "available": true
+        },
+        {
+          "key": "maniptrans_sr",
+          "display": "MP-SR",
+          "unit": "",
+          "higher_is_better": true,
+          "competition": "v2d-challenge-track3-mp-sr",
+          "available": true
+        },
+        {
+          "key": "rpe_cm",
+          "display": "RPE",
+          "unit": "cm",
+          "higher_is_better": false,
+          "competition": "v2d-challenge-track3-rpe",
+          "available": true
+        },
+        {
+          "key": "mppe_cm",
+          "display": "MPPE",
+          "unit": "cm",
+          "higher_is_better": false,
+          "competition": "v2d-challenge-track3-mppe",
+          "available": true
+        }
+      ],
+      "rows": [],
+      "incomplete": []
+    }
+  ]
+}
