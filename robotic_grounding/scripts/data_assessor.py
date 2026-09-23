@@ -308,13 +308,20 @@ def main() -> None:
     print(f"{'='*60}")
     print(f"Results: {total} sequences evaluated\n")
 
-    print(f"{'Check':<25} {'Pass Rate':>12} {'Mean Score':>12}")
-    print(f"{'-'*25} {'-'*12} {'-'*12}")
+    print(f"{'Check':<25} {'Pass Rate':>12} {'Mean Score':>12} {'Not measured':>13}")
+    print(f"{'-'*25} {'-'*12} {'-'*12} {'-'*13}")
     for name in check_names:
         pass_rate = pass_counts[name] / total if total > 0 else 0
+        # A NaN score means the check could not measure that sequence.  Averaging
+        # it in (or, worse, reporting it as 0) is how "not measured" gets read as
+        # "no problem found", so it is counted separately instead.
         scores = [r[f"{name}_score"] for r in results]
-        mean_score = sum(scores) / len(scores) if scores else 0
-        print(f"{name:<25} {pass_rate:>11.1%} {mean_score:>12.4f}")
+        measured = [s for s in scores if s == s]  # drop NaN
+        unmeasured = len(scores) - len(measured)
+        mean_score = sum(measured) / len(measured) if measured else float("nan")
+        print(
+            f"{name:<25} {pass_rate:>11.1%} {mean_score:>12.4f} {unmeasured:>13d}"
+        )
 
     passed = sum(1 for r in results if r["pass_all"])
     print(f"\nOverall: {passed}/{total} sequences pass all checks")

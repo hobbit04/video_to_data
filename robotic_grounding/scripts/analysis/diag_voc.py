@@ -7,6 +7,10 @@ p.add_argument("--task", type=str, default="Sharpa-V2D-v0")
 p.add_argument("--motion_file", type=str, required=True)
 p.add_argument("--voc", type=float, default=1.0)
 p.add_argument("--steps", type=int, default=700)
+p.add_argument("--voc_stiffness", type=float, default=None,
+               help="Override the virtual object controller's linear stiffness (default 50 N/m).")
+p.add_argument("--voc_damping", type=float, default=None,
+               help="Override its linear damping (default 10 N.s/m). d/k is the lag time constant.")
 p.add_argument("--disable_away", action="store_true",
                help="Disable object_away_from_trajectory entirely and report the per-env "
                     "deviation distribution, i.e. the environment's own noise floor.")
@@ -29,6 +33,15 @@ cfg.motion_file = a.motion_file
 apply_scene_config(cfg, SceneConfig.from_motion_file(cfg.motion_file))
 cfg.viewer.env_index = 0
 cfg.commands.dual_hands_object_tracking_command.initial_virtual_object_control_curriculum_scale = a.voc
+for _name, _term in vars(cfg.actions).items():
+    if "virtual_" in _name and hasattr(_term, "tracking_controller_linear_stiffness"):
+        if a.voc_stiffness is not None:
+            _term.tracking_controller_linear_stiffness = a.voc_stiffness
+        if a.voc_damping is not None:
+            _term.tracking_controller_linear_damping = a.voc_damping
+        print(f"[DIAG] {_name}: k={_term.tracking_controller_linear_stiffness} "
+              f"d={_term.tracking_controller_linear_damping} "
+              f"(lag time constant d/k = {_term.tracking_controller_linear_damping/_term.tracking_controller_linear_stiffness:.3f} s)", flush=True)
 if a.disable_away:
     cfg.terminations.object_away_from_trajectory = None
 if a.derive_thresholds:
@@ -51,7 +64,7 @@ act = torch.zeros(env.action_space.shape, device=env.device)
 tm = env.termination_manager
 n_pos = n_ori = n_both = 0
 counts = {k: 0 for k in tm.active_terms}
-pos_hi = []; ori_hi = []; pos_all = []; ori_all = []
+pos_hi = []; ori_hi = []; pos_all = []; ori_all = []; age_all = []
 for step in range(a.steps):
     with torch.inference_mode():
         env.step(act)
@@ -60,6 +73,7 @@ for step in range(a.steps):
     if dori.dim() > 1: dori = dori.max(dim=-1).values
     pos_hi.append(dpos.max().item()); ori_hi.append(dori.max().item())
     pos_all.append(dpos.cpu()); ori_all.append(dori.cpu())
+    age_all.append(cmd.steps_since_last_reset.flatten().cpu().clone())
     for k in tm.active_terms:
         counts[k] += int(tm.get_term(k).sum().item())
     oa = tm.get_term("object_away_from_trajectory") if "object_away_from_trajectory" in tm.active_terms else None
@@ -81,5 +95,19 @@ print(f"[DIAG] PER-ENV dori p50/p90/p99/p99.9/max = "
       f"{np.percentile(oa_,50):.4f}/{np.percentile(oa_,90):.4f}/{np.percentile(oa_,99):.4f}/{np.percentile(oa_,99.9):.4f}/{oa_.max():.4f} rad", flush=True)
 for thr in (0.05, 0.078, 0.10, 0.12, 0.15, 0.20):
     print(f"[DIAG]   threshold {thr:.3f} m -> {(pa > thr).mean()*100:6.2f}% of env-steps exceed", flush=True)
+
+# Split by how long ago the env was reset: a reset-ejection signature decays with
+# age, a soft-controller signature does not.
+age = torch.cat(age_all).numpy()
+print("[DIAG] deviation vs steps-since-reset (VOC decay_steps = 20):", flush=True)
+print(f"[DIAG]   {'age':>12} {'n':>8} {'p50':>8} {'p90':>8} {'p99':>8} {'max':>8}  {'>0.078m':>8}", flush=True)
+for lo, hi in [(0, 5), (5, 20), (20, 40), (40, 80), (80, 160), (160, 10**9)]:
+    m = (age >= lo) & (age < hi)
+    if not m.any():
+        continue
+    v = pa[m]
+    label = f"{lo}-{hi}" if hi < 10**9 else f"{lo}+"
+    print(f"[DIAG]   {label:>12} {v.size:>8} {np.percentile(v,50):8.4f} {np.percentile(v,90):8.4f} "
+          f"{np.percentile(v,99):8.4f} {v.max():8.4f}  {(v>0.078).mean()*100:7.2f}%", flush=True)
 env.close()
 app.close()

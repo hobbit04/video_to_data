@@ -236,13 +236,23 @@ def _resolve_mesh_path(mesh_path: str, seq_dir: Path | None = None) -> str:
 
 def _load_hull(
     mesh_path: str, cache: dict, seq_dir: Path | None = None
-) -> tuple[trimesh.Trimesh | None, float]:
-    """Load mesh and return (convex_hull, hull_volume_ratio).
+) -> tuple[trimesh.Trimesh | None, float | None]:
+    """Load mesh and return (convex_hull, hull_volume_ratio_or_None).
 
     hull_volume_ratio = hull.volume / mesh.volume.  A ratio >> 1 means the
     object is highly concave/open (e.g. a cup, vase, or open glasses frame) and
     the convex hull is a poor proxy for the actual solid.  Callers should skip
     the hand-object check when this ratio exceeds a threshold.
+
+    ``mesh.volume`` is only meaningful for a **watertight** mesh; on an open one
+    trimesh still returns a number, but it is the signed volume of an unclosed
+    surface and bears no relation to the solid.  A reconstructed mesh
+    (SAM3D et al.) is routinely not watertight, and the bogus volume makes the
+    ratio blow up, so a plainly convex object gets misread as concave and the
+    hand-object check is skipped -- which then reports as a pass.  When the
+    volume cannot be trusted this returns ``None`` instead of a fabricated
+    ratio, and the caller keeps the check running while flagging that the hull
+    proxy is unverified.
     """
     key = os.path.basename(mesh_path)
     if key in cache:
@@ -250,19 +260,25 @@ def _load_hull(
     local_path = _resolve_mesh_path(mesh_path, seq_dir)
     if not os.path.exists(local_path):
         log.warning("Mesh not found: %s", local_path)
-        cache[key] = (None, 0.0)
+        cache[key] = (None, None)
         return cache[key]
     try:
         mesh = trimesh.load(local_path, force="mesh")
         hull = mesh.convex_hull
-        ratio = (
-            hull.volume / mesh.volume if mesh.volume and mesh.volume > 1e-10 else 999.0
-        )
+        if mesh.is_watertight and mesh.volume and mesh.volume > 1e-10:
+            ratio = hull.volume / mesh.volume
+        else:
+            log.warning(
+                "Mesh %s is not watertight; hull_volume_ratio is not computable, "
+                "running the hand-object check against the convex hull unverified",
+                os.path.basename(local_path),
+            )
+            ratio = None
         cache[key] = (hull, ratio)
         return cache[key]
     except Exception as e:
         log.warning("Failed to load mesh %s: %s", local_path, e)
-        cache[key] = (None, 0.0)
+        cache[key] = (None, None)
         return cache[key]
 
 
@@ -418,10 +434,10 @@ def _check_sequence(
     # Pairs of (hull_or_None, hull_ratio).  Skip bodies where hull_ratio
     # exceeds hull_ratio_max: highly concave objects (AR glasses, open vases)
     # produce massive false positives with the convex hull signed_distance check.
-    hull_entries: list[tuple[trimesh.Trimesh | None, float]] = []
+    hull_entries: list[tuple[trimesh.Trimesh | None, float | None]] = []
     for mp in obj_mesh_paths:
         hull, ratio = _load_hull(mp, hull_cache, seq_dir)
-        if ratio > hull_ratio_max:
+        if ratio is not None and ratio > hull_ratio_max:
             hull_entries.append((None, ratio))  # skip this body
         else:
             hull_entries.append((hull, ratio))
@@ -767,16 +783,39 @@ def check(
 
     n_frames = len(right_frames_seq)
     if n_frames == 0:
-        return {"pass": True, "score": 0.0, "reason": "no frames"}
+        # NOT a pass: nothing was measured.  Returning pass=True here made an
+        # unmeasured sequence indistinguishable from a clean one, and a
+        # score of 0.00 cm read as "no penetration" rather than "no data".
+        return {
+            "pass": False,
+            "score": float("nan"),
+            "reason": "NOT MEASURED: no frames in the sequence",
+        }
 
     right_hsc = _HandShapeCache(right_shapes, right_frame_names)
     left_hsc = _HandShapeCache(left_shapes, left_frame_names)
 
     hull_cache: dict = {}
     hull_entries: list[tuple] = []
-    for mp in obj_mesh_paths:
+    skipped_bodies: list[str] = []
+    unverified_bodies: list[str] = []
+    for body_idx, mp in enumerate(obj_mesh_paths):
         hull, ratio = _load_hull(mp, hull_cache, seq_dir)
-        hull_entries.append((None, ratio) if ratio > hull_ratio_max else (hull, ratio))
+        name = os.path.basename(str(mp))
+        if hull is None:
+            skipped_bodies.append(f"{name} (mesh unreadable)")
+            hull_entries.append((None, ratio))
+        elif ratio is None:
+            # Volume not trustworthy (non-watertight mesh).  Keep checking
+            # against the hull, but say so -- for a genuinely concave object the
+            # hull over-states the solid and the depth may be pessimistic.
+            unverified_bodies.append(name)
+            hull_entries.append((hull, ratio))
+        elif ratio > hull_ratio_max:
+            skipped_bodies.append(f"{name} (hull_ratio {ratio:.2f} > {hull_ratio_max})")
+            hull_entries.append((None, ratio))
+        else:
+            hull_entries.append((hull, ratio))
 
     max_ho_pen = 0.0
     max_hh_pen = 0.0
@@ -811,6 +850,24 @@ def check(
     if max_hh_pen > max_penetration:
         parts.append(f"hand_hand:{max_hh_pen*100:.1f}cm")
     reason = ",".join(parts) if parts else f"ok (max={overall_max*100:.2f}cm)"
+
+    # A skipped body means the hand-object depth below is not a measurement of
+    # that body at all.  Never let that read as a pass: with every body skipped
+    # the score is 0.00 cm purely because nothing was checked.
+    if skipped_bodies and len(skipped_bodies) == len(hull_entries):
+        return {
+            "pass": False,
+            "score": float("nan"),
+            "reason": "NOT MEASURED: hand-object skipped for every body -- "
+            + "; ".join(skipped_bodies),
+        }
+    if skipped_bodies:
+        reason += " [hand-object skipped for " + "; ".join(skipped_bodies) + "]"
+        passed = False
+    if unverified_bodies:
+        reason += " [hull proxy unverified (non-watertight): " + ", ".join(
+            unverified_bodies
+        ) + "]"
 
     return {"pass": passed, "score": round(overall_max * 100, 4), "reason": reason}
 

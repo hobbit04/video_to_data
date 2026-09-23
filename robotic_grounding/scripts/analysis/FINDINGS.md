@@ -85,61 +85,72 @@ rotation  max 0.0965 rad (threshold 0.70 rad, 86% margin)
 criterion, following the trajectory. That is why `time_out` reached 95.8% and
 was misread as a success rate.
 
-**Fix** — derive the threshold from the reference's excursion. The repo already
-contains a ratio-based variant for hands,
-`tasks/v2d/mdp/terminations.py:hand_to_object_away_from_trajectory`, which is
-not wired into the config. Applying the same idea, or computing
-`position_threshold = max(0.05, 0.5 × reference_max_excursion)` at load time,
-gives 0.078 m for this clip and terminates a non-lifting policy at frame 142.
-
-**Mechanism IMPLEMENTED, but NOT enabled — the threshold has nowhere to go.**
+**Mechanism IMPLEMENTED, not yet enabled — it needs A-2b below first.**
 `position_threshold` / `orientation_threshold` now accept `None`, deriving
 `0.5 × reference extent` with floors of 0.05 m / 0.2 rad
 (`terminations.py:_derive_away_thresholds`). For this clip that gives
 **0.078 m / 0.200 rad**, and a frozen object would terminate at frame 140 —
 exactly the discrimination the term is supposed to provide.
 
-It cannot be turned on, and the reason is worse than a reset transient. With
-the term disabled and **zero actions at VOC = 1.0** — the object driven by the
-virtual controller along the reference, nothing else happening — the per-env
-deviation distribution over 358,400 env-steps is:
+It could not be turned on as shipped. With the term disabled and **zero actions
+at VOC = 1.0** — the object driven by the virtual controller along the
+reference, nothing else happening — the per-env deviation over 358,400
+env-steps is:
 
 ```
-p50 0.0310   p90 0.0907   p99 0.1091   p99.9 0.1361   max 0.2281 m
+p50 0.0313   p90 0.0906   p99 0.1095   p99.9 0.1346   max 0.2508 m
 ```
 
 | candidate threshold | env-steps exceeding it under zero actions |
 |---|---|
-| 0.050 m | 36.11% |
-| **0.078 m (derived)** | **18.94%** |
-| 0.100 m | 5.56% |
-| 0.120 m | 0.32% |
-| 0.150 m | 0.02% |
-| 0.200 m (current) | 0.00% |
+| 0.050 m | 36.4% |
+| **0.078 m (derived)** | **19.2%** |
+| 0.100 m | 5.4% |
+| 0.120 m | 0.3% |
+| 0.200 m (shipped) | 0.0% |
 
 Enabling the derived threshold terminated **62% of episodes** (2202 objAway
-against 1337 timeouts) with the policy doing nothing at all.
+against 1337 timeouts) with the policy doing nothing at all. The environment's
+own tracking noise was nearly as large as the reference's entire motion, so no
+threshold both discriminated and stayed off the noise.
 
-The bind is structural: **the environment's own tracking noise (~0.12 m at
-p99.7) is nearly as large as the reference's entire motion (0.156 m).** There is
-no threshold that both discriminates (needs to be well under 0.156 m) and does
-not fire on noise (needs to be over ~0.12 m). Note that this is not only reset
-transients — the median steady-state deviation is already 3.1 cm, because the
-virtual controller is a soft PD (50 N/m on a 0.3 kg object, 60 N cap).
+**The cause is the virtual object controller, not the data.** Two measurements
+settle it. First, splitting the deviation by steps-since-reset (see B-1) shows
+the reset is the *calmest* part of an episode — 0.30% exceedance in the first
+five steps against 29% at age 80–160 — which rules out ejection from the
+reference penetration. Second, the controller's own lag predicts the magnitude:
+the wrench is `50·Δp − 10·v`, so holding a steady velocity `v` *requires* a
+position error of `(d/k)·v = 0.2·v`. At the reference's peak 0.19 m/s that is
+3.8 cm, matching the observed 3.1 cm median, and it explains why the deviation
+peaks exactly where the object moves fastest.
 
-So the gap has to be closed from the other side before A-2 is worth anything:
+Re-running with stiffer gains confirms it outright:
 
-1. **B-1** — the reference penetrates the object by 2.19 cm, so every reset
-   ejects the hands and kicks the object. This is the largest single
-   contributor to the tail.
-2. **Stiffen the virtual controller** for short-motion clips, or scale its
-   gains to the object mass, so steady-state tracking is tighter than 3 cm.
-3. **Terminate on a different signal.** The lift ratio from C-1 is immune to
-   the horizontal noise that dominates this distribution, and is what the task
-   actually cares about.
+| gains | lag constant `d/k` | p50 | p90 | p99 | exceeding 0.078 m |
+|---|---|---|---|---|---|
+| k=50, d=10 (shipped) | 0.20 s | 0.0313 | 0.0906 | 0.1095 | **19.2%** |
+| **k=500, d=30** | 0.06 s | **0.0044** | **0.0113** | **0.0280** | **0.02%** |
 
-Re-run `diag_voc.py --disable_away` after B-1 to see whether a usable gap has
-opened.
+A 7x tighter median, and the exceedance at the derived threshold collapses from
+19.2% to 0.02%. **A-2 becomes usable purely by retuning the controller**, with
+no dependency on B-1. Both gain sets are stable: at k=500 on a 0.3 kg object
+`omega_n = 40.8 rad/s` and `zeta = 1.22`, with `omega_n*dt = 0.41` at the 100 Hz
+inner loop.
+
+The trade-off to weigh before adopting it: VOC is the training aid the
+curriculum decays to zero, so a stiffer one makes the assisted phase more
+idealised and may widen the gap the policy has to cross when it is withdrawn.
+Scaling the gains with object mass rather than fixing them is probably the right
+shape of fix.
+
+Recommended order: retune the controller, re-run `diag_voc.py --disable_away`
+to confirm the gap, then enable `position_threshold=null`.
+
+Note the orientation channel is separately under-damped — `K=10`, `D=0.1`,
+`I=0.001` gives `zeta = 0.5`, and the zero-action run reaches 2.4 rad of
+ringing. The derived 0.2 rad floor keeps that from terminating episodes, but it
+is worth fixing on its own.
+
 
 Measured by `objaway_margin.py`, `lift_timing.py`, `diag_voc.py`.
 
@@ -173,13 +184,35 @@ inside the box, the contact solver ejects them, and **`object_away` fires 0.36%
 of the time even with zero actions**, with deviations reaching 0.197 m — 98% of
 the termination threshold.
 
-**Fix**
-1. Run `scripts/data_assessor.py --checks hand_penetration,dummy_agent_success`
-   right after retargeting and refuse to start training if it fails. Two
-   minutes before spending eight hours.
-2. Reduce the penetration itself: more gsplat refinement (which moved it
-   2.11 → 1.25 cm on the right hand), a penetration penalty in the retargeting
-   IK, or a watertight mesh so the refinement loss sees the real surface.
+**Gate IMPLEMENTED.** `train_tissue_box_refined_8h.sh` now runs
+`data_assessor.py --reject` before launching and aborts on failure;
+`data_assessor` already exits non-zero under `--reject`, so only the wiring was
+missing. It passes `stride=1`, because the default `stride=3` samples every
+third frame and can step over the deepest one. `SKIP_PREFLIGHT=1` overrides it
+deliberately.
+
+**Reducing the penetration itself is still open.** Options: more gsplat
+refinement (which moved it 2.11 → 1.25 cm on the right hand), a penetration
+penalty in the retargeting IK, or a watertight mesh so the refinement loss sees
+the real surface.
+
+**Correction — this is NOT the prerequisite for A-2 it was claimed to be.**
+Splitting the zero-action deviation by steps-since-reset shows the reset
+transient is the *calmest* part of an episode, not the worst:
+
+| steps since reset | p50 | p90 | exceeding 0.078 m |
+|---|---|---|---|
+| 0–5 | 0.0081 | 0.0509 | **0.30%** |
+| 5–20 | 0.0161 | 0.0747 | 8.19% |
+| 20–40 | 0.0177 | 0.0977 | 20.08% |
+| 40–80 | 0.0279 | 0.1016 | 26.04% |
+| 80–160 | 0.0469 | 0.0997 | **29.14%** |
+| 160+ | 0.0285 | 0.0814 | 13.20% |
+
+That is the expected shape once you look: the reset teleports the object exactly
+onto the reference, so the deviation starts at zero by construction, and the VOC
+is pinned at 1.0 with the reference clock stopped for the first 20 steps. The
+deviation grows only once the clock starts. A-2 has the real cause.
 
 Measured by `pen_per_hand.py`, `diag_voc.py`.
 
@@ -200,12 +233,35 @@ The `"no frames"` path at `filter_penetrations.py:770` does the same. **"Not
 measured" is indistinguishable from "passed"**; the first run of this check
 returned `pass 100%, score 0.0000` and was nearly taken at face value.
 
-**Fix**
-1. Surface the skip reason in the result, e.g.
-   `{"pass": None, "reason": "skipped: hull_ratio 6.28 > 3.0"}`. This is the
-   more urgent half — it lets a human catch the problem even without fix 2.
-2. Normalise the mesh before judging convexity (`trimesh.repair`, or use the
-   convex hull as the collision proxy directly).
+**Fix — IMPLEMENTED.** Two changes, neither of which needs the mesh repaired.
+
+`_load_hull` now computes the ratio **only when the mesh is watertight** and
+returns `None` otherwise, instead of fabricating one from a meaningless volume.
+A `None` ratio no longer skips the check: it runs against the convex hull and
+the result is flagged `[hull proxy unverified (non-watertight)]`, so a reader
+knows the depth could be pessimistic for a genuinely concave object. Repairing
+the mesh was tried and rejected — `trimesh.repair.fill_holes` does not close
+this mesh, and a voxel-fill volume is pitch dependent (0.00178 m³ at a 0.65 cm
+pitch against 0.00111 m³ at 0.32 cm), so it would have swapped one arbitrary
+number for another.
+
+`check()` can no longer return a pass for something it did not measure. When
+every body is skipped, or the sequence has no frames, it returns
+`{"pass": False, "score": NaN, "reason": "NOT MEASURED: ..."}`; a partial skip
+appends the reason and fails. `data_assessor` counts NaN scores in a separate
+**Not measured** column instead of averaging them in as zeros.
+
+The same command that used to report a clean sweep now reports the truth:
+
+| | before | after |
+|---|---|---|
+| `tissue_box_refined` | `pass, 0.0, "ok (max=0.00cm)"` | `FAIL, 2.18 cm, hull proxy unverified` |
+| `tissue_box_timing` | `pass, 0.0, "ok (max=0.00cm)"` | `FAIL, 2.56 cm, hull proxy unverified` |
+| `tissue_box_simple` | `pass, 0.0, "no frames"` | `FAIL, NaN, "NOT MEASURED: no frames"` |
+| summary | `Pass Rate 100%, Mean Score 0.0000` | `Pass Rate 0.0%, Mean 2.3690, Not measured 1` |
+
+No `hull_ratio_max` override is needed any more. Saved as
+`qc_penetration_default_after_B2.json` beside the pre-fix `qc_penetration.json`.
 
 ---
 
@@ -339,13 +395,17 @@ To recover these numbers from the log, note that `Episode_Reward/<term>` is
 
 ## Suggested order
 
-1. **B-2** (surface the skip reason) — cheapest, and without it you cannot
-   verify anything else.
-2. **B-1** (penetration below 2 cm) — prerequisite for A-2.
-3. **C-1** (log lift ratio) — without it you cannot tell whether a change helped.
-4. **A-1** (`var` 0.1 → 0.02) — one config value, largest expected effect.
-5. A 1,000-iteration run — does the lift ratio move?
-6. **A-2** (thresholds), then **D-1**, **D-2**, **D-3**.
+1. ~~**B-2** (surface the skip reason)~~ — done.
+2. ~~**A-1** (derive `var`)~~ — done; `var=null` in the training script.
+3. ~~**B-1 gate**~~ — done; the training script aborts on a failing sequence.
+4. **A-2b: retune the virtual object controller.** `k=500, d=30` (or gains
+   scaled to object mass) drops the noise floor from 19.2% to 0.02% exceedance
+   at the derived threshold. This, not the penetration, is what blocks A-2.
+5. **C-1** (log lift ratio) — without it you cannot tell whether a change helped.
+6. A 1,000-iteration run — does the lift ratio move?
+7. **A-2** (enable `position_threshold=null`), then **D-1**, **D-2**, **D-3**.
+8. **B-1 proper** (get the penetration under 2 cm) — still worth doing for the
+   reference's own sake, just not on A-2's critical path.
 
 Steps 1–4 are configuration changes and added observability only, so the run
 remains a faithful CHORD reproduction. D-2 is the sole reward-function change
