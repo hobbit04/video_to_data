@@ -15,7 +15,10 @@ as a Claude artifact).
 | `rew_headroom.py` | What `object_keypoints_tracking_exp` score does a frozen object get? | container, no sim |
 | `rew_sweep.py` | How does that score move with `var`, the keypoint lever, and motion amplitude? | container, no sim |
 | `pen_per_hand.py` | Per-hand, per-frame hand-object penetration (capsule based) | container, no sim |
-| `diag_voc.py` | With zero actions at VOC=1.0, which termination fires and how close do deviations get to threshold? | Isaac Lab, 512 envs |
+| `diag_voc.py` | With zero actions at VOC=1.0, which termination fires and how close do deviations get to threshold? Flags isolate the cause: `--disable_away`, `--no_hand_object_collisions`, `--voc_stiffness/--voc_damping`, `--first_frame`, `--derive_thresholds` | Isaac Lab, 512 envs |
+| `voc_lag.py` | What tracking error does the virtual controller's own lag predict? | container, no sim |
+| `corr_pen.py` | Does the object's deviation track the reference's per-frame penetration? | container, no sim |
+| `verify_A.py` | Do the derived var/thresholds reproduce the hand-measured values? | container, no sim |
 | `../rsl_rl/diag_policy.py` | Instrumented rollout of a trained checkpoint: lift ratio, per-hand wrist error and wrench support | Isaac Lab, needs `--ckpt` |
 
 `train_8h_metrics.csv` is the per-iteration metric table parsed out of the

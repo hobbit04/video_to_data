@@ -114,34 +114,68 @@ against 1337 timeouts) with the policy doing nothing at all. The environment's
 own tracking noise was nearly as large as the reference's entire motion, so no
 threshold both discriminated and stayed off the noise.
 
-**The cause is the virtual object controller, not the data.** Two measurements
-settle it. First, splitting the deviation by steps-since-reset (see B-1) shows
-the reset is the *calmest* part of an episode — 0.30% exceedance in the first
-five steps against 29% at age 80–160 — which rules out ejection from the
-reference penetration. Second, the controller's own lag predicts the magnitude:
-the wrench is `50·Δp − 10·v`, so holding a steady velocity `v` *requires* a
-position error of `(d/k)·v = 0.2·v`. At the reference's peak 0.19 m/s that is
-3.8 cm, matching the observed 3.1 cm median, and it explains why the deviation
-peaks exactly where the object moves fastest.
+**The cause is the hands pushing the object, driven by this penetration.**
+Three measurements pin it down.
 
-Re-running with stiffer gains confirms it outright:
+First, the virtual controller is not at fault. Disabling robot-to-object
+collisions leaves it tracking the reference alone:
 
-| gains | lag constant `d/k` | p50 | p90 | p99 | exceeding 0.078 m |
-|---|---|---|---|---|---|
-| k=50, d=10 (shipped) | 0.20 s | 0.0313 | 0.0906 | 0.1095 | **19.2%** |
-| **k=500, d=30** | 0.06 s | **0.0044** | **0.0113** | **0.0280** | **0.02%** |
+| | collisions on (shipped) | collisions off |
+|---|---|---|
+| p50 | 3.13 cm | **0.26 cm** |
+| p90 | 9.06 cm | **0.74 cm** |
+| p99 | 10.95 cm | **0.82 cm** |
+| max | 25.08 cm | **0.84 cm** |
+| exceeding 0.078 m | 19.2% | **0.00%** |
 
-A 7x tighter median, and the exceedance at the derived threshold collapses from
-19.2% to 0.02%. **A-2 becomes usable purely by retuning the controller**, with
-no dependency on B-1. Both gain sets are stable: at k=500 on a 0.3 kg object
-`omega_n = 40.8 rad/s` and `zeta = 1.22`, with `omega_n*dt = 0.41` at the 100 Hz
-inner loop.
+That 0.84 cm ceiling is exactly what the controller's own lag predicts. The
+wrench is `50·Δp − 10·v` with no feed-forward of the reference's velocity, so
+holding velocity `v` requires `(d/k)·v` of position error, and accelerating at
+`a` requires `(m/k)·a`. On the env timeline (`motion_speed 0.5` stretches the
+13.0 s clip to 25.9 s, halving all speeds) the reference object peaks at
+0.039 m/s and 0.23 m/s², giving a budget of **0.83 cm max** against the 0.84 cm
+measured. The controller does its job to within a centimetre; **97% of the
+deviation is the hands.**
 
-The trade-off to weigh before adopting it: VOC is the training aid the
-curriculum decays to zero, so a stiffer one makes the assisted phase more
-idealised and may widen the gap the policy has to cross when it is withdrawn.
-Scaling the gains with object mass rather than fixing them is probably the right
-shape of fix.
+Second, the deviation tracks the penetration. Running every env in phase and
+comparing the per-step deviation against the reference's per-frame penetration
+curve gives Pearson r = **+0.56** (Spearman +0.54), and the deviation roughly
+doubles between the low- and high-penetration halves of the trajectory
+(2.86 cm against 5.60 cm).
+
+Third, the force budget explains why the hands win. Each hand's wrench is capped
+at 60 N per axis, while the object controller produces only `50 × 0.03 = 1.5 N`
+at a 3 cm error. The hands overpower it by more than an order of magnitude.
+
+So the chain is: the retargeted reference commands the hands 2.19 cm inside the
+box → the contact solver applies separating impulses for as long as contact
+lasts → the object is shoved 3–11 cm off the reference → that noise floor
+overlaps the failure signal (a non-lifting policy reaches 13.9 cm) → no
+threshold separates them. **B-1 is the fix.**
+
+Stiffening the controller also works, but by masking rather than curing — at
+`k=500` a 3 cm error produces 15 N, enough to out-muscle the hands:
+
+| gains | p50 | p90 | p99 | exceeding 0.078 m |
+|---|---|---|---|---|
+| k=50, d=10 (shipped) | 0.0313 | 0.0906 | 0.1095 | **19.2%** |
+| **k=500, d=30** | **0.0044** | **0.0113** | **0.0280** | **0.02%** |
+
+Both gain sets are stable (at k=500 on 0.3 kg, `omega_n = 40.8 rad/s`,
+`zeta = 1.22`, `omega_n*dt = 0.41` at the 100 Hz inner loop). It is a legitimate
+lever if a sharper signal is needed before the reference can be re-fitted, but
+it leaves the hands crushing the object and only hides it, and a stiffer aid
+makes the assisted phase more idealised than the unassisted one the curriculum
+decays to. Prefer fixing B-1.
+
+Note the orientation channel is separately under-damped — `K=10`, `D=0.1`,
+`I=0.001` gives `zeta = 0.5`, and the zero-action run reaches 2.4 rad of
+ringing. The derived 0.2 rad floor keeps that from terminating episodes, but it
+is worth fixing on its own.
+
+Recommended order: reduce the penetration (B-1), re-run
+`diag_voc.py --disable_away` to confirm the floor has dropped, then enable
+`position_threshold=null`.
 
 Recommended order: retune the controller, re-run `diag_voc.py --disable_away`
 to confirm the gap, then enable `position_threshold=null`.
@@ -196,9 +230,10 @@ refinement (which moved it 2.11 → 1.25 cm on the right hand), a penetration
 penalty in the retargeting IK, or a watertight mesh so the refinement loss sees
 the real surface.
 
-**Correction — this is NOT the prerequisite for A-2 it was claimed to be.**
-Splitting the zero-action deviation by steps-since-reset shows the reset
-transient is the *calmest* part of an episode, not the worst:
+**Correction — the reset-ejection story was wrong, but the penetration is still
+on A-2's critical path.** Splitting the zero-action deviation by
+steps-since-reset shows the reset is the *calmest* part of an episode, not the
+worst:
 
 | steps since reset | p50 | p90 | exceeding 0.078 m |
 |---|---|---|---|
@@ -209,10 +244,11 @@ transient is the *calmest* part of an episode, not the worst:
 | 80–160 | 0.0469 | 0.0997 | **29.14%** |
 | 160+ | 0.0285 | 0.0814 | 13.20% |
 
-That is the expected shape once you look: the reset teleports the object exactly
-onto the reference, so the deviation starts at zero by construction, and the VOC
-is pinned at 1.0 with the reference clock stopped for the first 20 steps. The
-deviation grows only once the clock starts. A-2 has the real cause.
+The reset teleports the object exactly onto the reference, so the deviation
+starts at zero by construction and the VOC is pinned at 1.0 with the reference
+clock stopped for the first 20 steps. What the growth with age actually shows is
+the hands slowly shoving the object out of place once contact is live — a
+*continuous* mechanism, not an impulse at reset. A-2 has the measurements.
 
 Measured by `pen_per_hand.py`, `diag_voc.py`.
 
@@ -398,14 +434,16 @@ To recover these numbers from the log, note that `Episode_Reward/<term>` is
 1. ~~**B-2** (surface the skip reason)~~ — done.
 2. ~~**A-1** (derive `var`)~~ — done; `var=null` in the training script.
 3. ~~**B-1 gate**~~ — done; the training script aborts on a failing sequence.
-4. **A-2b: retune the virtual object controller.** `k=500, d=30` (or gains
-   scaled to object mass) drops the noise floor from 19.2% to 0.02% exceedance
-   at the derived threshold. This, not the penetration, is what blocks A-2.
+4. **B-1 proper: get the penetration under 2 cm.** This is what blocks A-2.
+   The hands, commanded 2.19 cm inside the box, shove it 3-11 cm off the
+   reference and drown the failure signal; with hand-object collisions disabled
+   the same measurement reads 0.26 cm. Retuning the controller to `k=500, d=30`
+   also clears the floor (19.2% -> 0.02% exceedance) and is a usable stopgap,
+   but it out-muscles the hands rather than stopping them.
 5. **C-1** (log lift ratio) — without it you cannot tell whether a change helped.
 6. A 1,000-iteration run — does the lift ratio move?
 7. **A-2** (enable `position_threshold=null`), then **D-1**, **D-2**, **D-3**.
-8. **B-1 proper** (get the penetration under 2 cm) — still worth doing for the
-   reference's own sake, just not on A-2's critical path.
+8. **D-4/D-5** — re-evaluate the curriculum length only after the above.
 
 Steps 1–4 are configuration changes and added observability only, so the run
 remains a faithful CHORD reproduction. D-2 is the sole reward-function change

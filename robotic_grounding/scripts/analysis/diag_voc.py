@@ -7,6 +7,12 @@ p.add_argument("--task", type=str, default="Sharpa-V2D-v0")
 p.add_argument("--motion_file", type=str, required=True)
 p.add_argument("--voc", type=float, default=1.0)
 p.add_argument("--steps", type=int, default=700)
+p.add_argument("--first_frame", action="store_true",
+               help="Reset every env to frame 0 so all envs share a phase, making the "
+                    "per-step deviation comparable against the reference penetration curve.")
+p.add_argument("--no_hand_object_collisions", action="store_true",
+               help="Disable robot-to-object collisions, isolating the virtual controller's "
+                    "own tracking error from whatever the hands do to the object.")
 p.add_argument("--voc_stiffness", type=float, default=None,
                help="Override the virtual object controller's linear stiffness (default 50 N/m).")
 p.add_argument("--voc_damping", type=float, default=None,
@@ -42,6 +48,11 @@ for _name, _term in vars(cfg.actions).items():
         print(f"[DIAG] {_name}: k={_term.tracking_controller_linear_stiffness} "
               f"d={_term.tracking_controller_linear_damping} "
               f"(lag time constant d/k = {_term.tracking_controller_linear_damping/_term.tracking_controller_linear_stiffness:.3f} s)", flush=True)
+if a.first_frame:
+    cfg.commands.dual_hands_object_tracking_command.always_reset_to_first_frame = True
+if a.no_hand_object_collisions and hasattr(cfg.events, "setup_collision_groups"):
+    cfg.events.setup_collision_groups.params["disable_robot_to_object_collisions"] = True
+    print("[DIAG] robot-to-object collisions DISABLED", flush=True)
 if a.disable_away:
     cfg.terminations.object_away_from_trajectory = None
 if a.derive_thresholds:
@@ -64,14 +75,14 @@ act = torch.zeros(env.action_space.shape, device=env.device)
 tm = env.termination_manager
 n_pos = n_ori = n_both = 0
 counts = {k: 0 for k in tm.active_terms}
-pos_hi = []; ori_hi = []; pos_all = []; ori_all = []; age_all = []
+pos_hi = []; ori_hi = []; pos_all = []; ori_all = []; age_all = []; pos_mean = []
 for step in range(a.steps):
     with torch.inference_mode():
         env.step(act)
     dpos = torch.norm(cmd.object_body_position_command_e - cmd.object_position_e, dim=-1).max(dim=-1).values
     dori = math_utils.quat_error_magnitude(cmd.object_orientation_e, cmd.object_body_wxyz_command_e)
     if dori.dim() > 1: dori = dori.max(dim=-1).values
-    pos_hi.append(dpos.max().item()); ori_hi.append(dori.max().item())
+    pos_hi.append(dpos.max().item()); ori_hi.append(dori.max().item()); pos_mean.append(dpos.mean().item())
     pos_all.append(dpos.cpu()); ori_all.append(dori.cpu())
     age_all.append(cmd.steps_since_last_reset.flatten().cpu().clone())
     for k in tm.active_terms:
@@ -87,6 +98,7 @@ for step in range(a.steps):
 print("[DIAG] FINAL", counts, "objAway pos-only/ori-only/both =", n_pos, n_ori, n_both, flush=True)
 import numpy as np
 print(f"[DIAG] dpos p50/p95/p99/max = {np.percentile(pos_hi,50):.4f}/{np.percentile(pos_hi,95):.4f}/{np.percentile(pos_hi,99):.4f}/{max(pos_hi):.4f} m", flush=True)
+np.save("out/diag_voc_pos_mean.npy", np.array(pos_mean))
 print(f"[DIAG] dori p50/p95/p99/max = {np.percentile(ori_hi,50):.4f}/{np.percentile(ori_hi,95):.4f}/{np.percentile(ori_hi,99):.4f}/{max(ori_hi):.4f} rad", flush=True)
 pa = torch.cat(pos_all).numpy(); oa_ = torch.cat(ori_all).numpy()
 print(f"[DIAG] PER-ENV dpos p50/p90/p99/p99.9/max = "
