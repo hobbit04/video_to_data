@@ -7,6 +7,12 @@ p.add_argument("--task", type=str, default="Sharpa-V2D-v0")
 p.add_argument("--motion_file", type=str, required=True)
 p.add_argument("--voc", type=float, default=1.0)
 p.add_argument("--steps", type=int, default=700)
+p.add_argument("--disable_away", action="store_true",
+               help="Disable object_away_from_trajectory entirely and report the per-env "
+                    "deviation distribution, i.e. the environment's own noise floor.")
+p.add_argument("--derive_thresholds", action="store_true",
+               help="Set object_away_from_trajectory thresholds to None so they are derived "
+                    "from the reference motion (A-2), instead of the fixed 0.2 m / 0.7 rad.")
 AppLauncher.add_app_launcher_args(p)
 a = p.parse_args()
 app = AppLauncher(a).app
@@ -23,17 +29,29 @@ cfg.motion_file = a.motion_file
 apply_scene_config(cfg, SceneConfig.from_motion_file(cfg.motion_file))
 cfg.viewer.env_index = 0
 cfg.commands.dual_hands_object_tracking_command.initial_virtual_object_control_curriculum_scale = a.voc
+if a.disable_away:
+    cfg.terminations.object_away_from_trajectory = None
+if a.derive_thresholds:
+    _p = cfg.terminations.object_away_from_trajectory.params
+    _p["position_threshold"] = None
+    _p["orientation_threshold"] = None
 env = gym.make(a.task, cfg=cfg).unwrapped
 env.reset()
 cmd = env.command_manager.get_term("dual_hands_object_tracking_command")
 print(f"[DIAG] retargeted_horizon = {cmd.retargeted_horizon}", flush=True)
 print(f"[DIAG] object mass = {env.scene['tissue_box_refined'].root_physx_view.get_masses()[0].tolist()}", flush=True)
+print(f"[DIAG] reference travel {cmd.reference_object_travel:.4f} m, rotation {cmd.reference_object_rotation:.4f} rad", flush=True)
+if "object_away_from_trajectory" in env.termination_manager.active_terms:
+    _tp = env.termination_manager.get_term_cfg("object_away_from_trajectory").params
+    print(f"[DIAG] thresholds in cfg: {_tp}", flush=True)
+else:
+    print("[DIAG] object_away_from_trajectory DISABLED -- measuring the noise floor", flush=True)
 
 act = torch.zeros(env.action_space.shape, device=env.device)
 tm = env.termination_manager
 n_pos = n_ori = n_both = 0
 counts = {k: 0 for k in tm.active_terms}
-pos_hi = []; ori_hi = []
+pos_hi = []; ori_hi = []; pos_all = []; ori_all = []
 for step in range(a.steps):
     with torch.inference_mode():
         env.step(act)
@@ -41,10 +59,11 @@ for step in range(a.steps):
     dori = math_utils.quat_error_magnitude(cmd.object_orientation_e, cmd.object_body_wxyz_command_e)
     if dori.dim() > 1: dori = dori.max(dim=-1).values
     pos_hi.append(dpos.max().item()); ori_hi.append(dori.max().item())
+    pos_all.append(dpos.cpu()); ori_all.append(dori.cpu())
     for k in tm.active_terms:
         counts[k] += int(tm.get_term(k).sum().item())
-    oa = tm.get_term("object_away_from_trajectory")
-    if oa.any():
+    oa = tm.get_term("object_away_from_trajectory") if "object_away_from_trajectory" in tm.active_terms else None
+    if oa is not None and oa.any():
         m = oa
         pv = (dpos[m] > 0.2); ov = (dori[m] > 0.7)
         n_pos += int((pv & ~ov).sum()); n_ori += int((ov & ~pv).sum()); n_both += int((pv & ov).sum())
@@ -55,5 +74,12 @@ print("[DIAG] FINAL", counts, "objAway pos-only/ori-only/both =", n_pos, n_ori, 
 import numpy as np
 print(f"[DIAG] dpos p50/p95/p99/max = {np.percentile(pos_hi,50):.4f}/{np.percentile(pos_hi,95):.4f}/{np.percentile(pos_hi,99):.4f}/{max(pos_hi):.4f} m", flush=True)
 print(f"[DIAG] dori p50/p95/p99/max = {np.percentile(ori_hi,50):.4f}/{np.percentile(ori_hi,95):.4f}/{np.percentile(ori_hi,99):.4f}/{max(ori_hi):.4f} rad", flush=True)
+pa = torch.cat(pos_all).numpy(); oa_ = torch.cat(ori_all).numpy()
+print(f"[DIAG] PER-ENV dpos p50/p90/p99/p99.9/max = "
+      f"{np.percentile(pa,50):.4f}/{np.percentile(pa,90):.4f}/{np.percentile(pa,99):.4f}/{np.percentile(pa,99.9):.4f}/{pa.max():.4f} m  (n={pa.size})", flush=True)
+print(f"[DIAG] PER-ENV dori p50/p90/p99/p99.9/max = "
+      f"{np.percentile(oa_,50):.4f}/{np.percentile(oa_,90):.4f}/{np.percentile(oa_,99):.4f}/{np.percentile(oa_,99.9):.4f}/{oa_.max():.4f} rad", flush=True)
+for thr in (0.05, 0.078, 0.10, 0.12, 0.15, 0.20):
+    print(f"[DIAG]   threshold {thr:.3f} m -> {(pa > thr).mean()*100:6.2f}% of env-steps exceed", flush=True)
 env.close()
 app.close()

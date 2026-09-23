@@ -73,10 +73,51 @@ def object_wxyz_tracking_exp(
     return object_orientation_tracking_rew
 
 
+#: Bounds applied when ``object_keypoints_tracking_exp`` derives ``var`` from the
+#: reference motion.  The ceiling is the historical fixed default, so deriving can
+#: only sharpen the reward, never blunt it; the floor keeps a near-static
+#: demonstration from collapsing the reward to zero everywhere.
+_DERIVED_VAR_FLOOR = 0.005
+_DERIVED_VAR_CEIL = 0.1
+
+
+def _derive_keypoint_var(command) -> float:
+    """Scale the keypoint reward's variance to how far the reference actually moves.
+
+    ``var`` sets the error scale the exponential can resolve: the reward is
+    ``exp(-d^2 / var)``, so it stops discriminating past ``d ~ sqrt(var)``.  The
+    fixed 0.1 default resolves ~0.32 m, which suits mocap sequences but not a
+    clip whose entire object motion is smaller than that -- there, a policy that
+    never moves the object already scores near the ceiling and the task itself is
+    worth only a few percent of the reward.
+
+    Setting ``var = travel^2`` makes the resolvable error track the
+    demonstration: it reproduces the 0.1 default for a ~0.32 m mocap motion and
+    sharpens automatically for short clips.
+    """
+    cached = getattr(command, "_derived_keypoint_var", None)
+    if cached is not None:
+        return cached
+    travel = getattr(command, "reference_object_travel", None)
+    if travel is None:
+        raise ValueError(
+            "var=None requires the command term to expose reference_object_travel; "
+            "pass an explicit var for command terms that do not."
+        )
+    var = min(max(travel**2, _DERIVED_VAR_FLOOR), _DERIVED_VAR_CEIL)
+    print(
+        f"[v2d] object_keypoints_tracking_exp: derived var={var:.5f} from "
+        f"reference travel {travel:.4f} m (fixed default is 0.1)",
+        flush=True,
+    )
+    command._derived_keypoint_var = var
+    return var
+
+
 def object_keypoints_tracking_exp(
     env: ManagerBasedRLEnv,
     command_name: str = "dual_hands_object_tracking_command",
-    var: float = 0.1,
+    var: float | None = 0.1,
 ) -> torch.Tensor:
     """
     Compute the exponential reward for object keypoints tracking.
@@ -88,12 +129,26 @@ def object_keypoints_tracking_exp(
     Args:
         env (ManagerBasedRLEnv): The RL environment instance.
         command_name (str, optional): The name of the command term providing trajectory data. Defaults to "dual_hands_object_tracking_command".
-        var (float, optional): Variance (decay scale) for the exponential reward. Smaller values penalize deviations more sharply.
+        var (float | None, optional): Variance (decay scale) for the exponential reward. Smaller values penalize deviations more sharply.
+            Pass ``None`` to derive it from the reference motion's own extent -- see :func:`_derive_keypoint_var`. Required for
+            sequences whose object travel is small relative to the fixed default, where the reward otherwise cannot tell a
+            successful episode from one that never moves the object.
 
     Returns:
         torch.Tensor: A tensor of shape (num_envs,) containing the keypoints tracking reward for each environment.
+
+    Note:
+        ``command.KEYPOINT_VECS`` places the six keypoints 1 m from the object
+        centre regardless of object size, which looks like the obvious thing to
+        shrink for a small object.  Measured on a 15.4 cm tissue-box clip,
+        shrinking the lever makes the reward *less* discriminative (a do-nothing
+        policy scores 0.9326 at 1 m and 0.9455 at 0.2 m), because most of the
+        signal comes from the orientation error that the long lever amplifies.
+        Adjust ``var``, not the lever.
     """
     command = env.command_manager.get_term(command_name)
+    if var is None:
+        var = _derive_keypoint_var(command)
 
     # Get current object state
     object_position = command.object_position_e.unsqueeze(2).expand(

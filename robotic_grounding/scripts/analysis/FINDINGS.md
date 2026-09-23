@@ -32,23 +32,40 @@ band for the whole task**. In return terms that is 22 points, against the
 ~147 points of remaining reward stream forfeited by an early termination.
 Standing still is the rational choice under this objective.
 
-**Fix** — config only, no code change:
+**Fix — IMPLEMENTED.** `var` now accepts `None`, in which case
+`rewards.py:_derive_keypoint_var` computes it from the reference motion's own
+extent as `var = travel²`, clamped to `[0.005, 0.1]`. That reproduces the 0.1
+default for a ~0.32 m mocap motion and sharpens automatically for short clips.
+The command term measures the extent once at load
+(`hand_object_commands.py:_init_reference_motion_scale`) and exposes it as
+`reference_object_travel` / `reference_object_rotation`, both computed as
+trajectory diameters so they stay valid under the random-frame resets.
+
+The shipped default stays at 0.1 — deriving is opt-in per run, so no other
+dataset changes behaviour:
 
 ```
-env.rewards.object_keypoints_tracking_exp.params.var=0.02
+env.rewards.object_keypoints_tracking_exp.params.var=null
 ```
 
 | var | do-nothing score | task reward band |
 |---|---|---|
 | 0.1 (default) | 0.9326 | 6.7% |
-| **0.02** | 0.7548 | **24.5%** |
-| 0.01 | 0.6377 | 36.2% |
+| **derived = 0.0243** | 0.7851 | **21.5%** |
+| 0.01 (hand-picked, for reference) | 0.6377 | 36.2% |
 
-Below 0.005 the reward goes too flat early in training; **0.02–0.05** is the
-safe range. The principled fix is to derive `var` from the reference's own
-excursion rather than ship one default for every sequence.
+The derivation lands on 0.0243 for this clip, within a hair of the 0.02 that
+was arrived at by hand. `train_tissue_box_refined_8h.sh` now passes `var=null`.
 
-Measured by `rew_headroom.py`, `rew_sweep.py`.
+Two lines confirm it. `[v2d] reference object travel 0.1559 m, rotation
+0.0963 rad` prints at startup when the motion loads. `[v2d]
+object_keypoints_tracking_exp: derived var=0.02432` prints only at the first
+curriculum step that gives the term a non-zero weight (iteration 526 in the
+compressed schedule), because Isaac Lab's `RewardManager.compute` skips terms
+whose weight is 0 and so never calls the function before then. Both were
+verified end to end with a 2-iteration smoke run.
+
+Measured by `rew_headroom.py`, `rew_sweep.py`, `verify_A.py`.
 
 ### A-2. `object_away_from_trajectory` thresholds 0.2 m / 0.7 rad
 
@@ -75,13 +92,58 @@ not wired into the config. Applying the same idea, or computing
 `position_threshold = max(0.05, 0.5 × reference_max_excursion)` at load time,
 gives 0.078 m for this clip and terminates a non-lifting policy at frame 142.
 
-**Blocked on B-1** — do not lower this first. Reset transients already reach
-0.197 m under pure reference replay (see B-1), so a lower threshold would kill
-legitimate episodes.
+**Mechanism IMPLEMENTED, but NOT enabled — the threshold has nowhere to go.**
+`position_threshold` / `orientation_threshold` now accept `None`, deriving
+`0.5 × reference extent` with floors of 0.05 m / 0.2 rad
+(`terminations.py:_derive_away_thresholds`). For this clip that gives
+**0.078 m / 0.200 rad**, and a frozen object would terminate at frame 140 —
+exactly the discrimination the term is supposed to provide.
 
-Measured by `objaway_margin.py`, `lift_timing.py`.
+It cannot be turned on, and the reason is worse than a reset transient. With
+the term disabled and **zero actions at VOC = 1.0** — the object driven by the
+virtual controller along the reference, nothing else happening — the per-env
+deviation distribution over 358,400 env-steps is:
 
-### A-3. `KEYPOINT_VECS` — verified, do not touch
+```
+p50 0.0310   p90 0.0907   p99 0.1091   p99.9 0.1361   max 0.2281 m
+```
+
+| candidate threshold | env-steps exceeding it under zero actions |
+|---|---|
+| 0.050 m | 36.11% |
+| **0.078 m (derived)** | **18.94%** |
+| 0.100 m | 5.56% |
+| 0.120 m | 0.32% |
+| 0.150 m | 0.02% |
+| 0.200 m (current) | 0.00% |
+
+Enabling the derived threshold terminated **62% of episodes** (2202 objAway
+against 1337 timeouts) with the policy doing nothing at all.
+
+The bind is structural: **the environment's own tracking noise (~0.12 m at
+p99.7) is nearly as large as the reference's entire motion (0.156 m).** There is
+no threshold that both discriminates (needs to be well under 0.156 m) and does
+not fire on noise (needs to be over ~0.12 m). Note that this is not only reset
+transients — the median steady-state deviation is already 3.1 cm, because the
+virtual controller is a soft PD (50 N/m on a 0.3 kg object, 60 N cap).
+
+So the gap has to be closed from the other side before A-2 is worth anything:
+
+1. **B-1** — the reference penetrates the object by 2.19 cm, so every reset
+   ejects the hands and kicks the object. This is the largest single
+   contributor to the tail.
+2. **Stiffen the virtual controller** for short-motion clips, or scale its
+   gains to the object mass, so steady-state tracking is tighter than 3 cm.
+3. **Terminate on a different signal.** The lift ratio from C-1 is immune to
+   the horizontal noise that dominates this distribution, and is what the task
+   actually cares about.
+
+Re-run `diag_voc.py --disable_away` after B-1 to see whether a usable gap has
+opened.
+
+Measured by `objaway_margin.py`, `lift_timing.py`, `diag_voc.py`.
+
+### A-3. `KEYPOINT_VECS` — verified, do not touch (documented in code)
 
 `tasks/v2d/mdp/commands/hand_object_commands.py:290-304` places the six object
 keypoints at **1 m** from the object centre regardless of object size. This
@@ -89,7 +151,8 @@ looks like the obvious culprit for a 20 cm box, but shrinking the lever makes
 the reward band **worse**, not better (6.7% → 5.4% at 0.2 m). Most of the 6.7%
 comes from the small orientation change being amplified by the long lever;
 remove it and only the position error is left, which discriminates even less.
-Do not spend effort here.
+Do not spend effort here. This is now recorded in the
+`object_keypoints_tracking_exp` docstring so the next reader does not repeat it.
 
 Measured by `rew_sweep.py`.
 

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Tuple
 
@@ -35,6 +36,9 @@ from robotic_grounding.tasks.v2d.mdp.utils_jit import (
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
+
+#: Cap on frames used for the O(T^2) reference-motion-scale measurement.
+_MOTION_SCALE_MAX_SAMPLES = 2000
 
 ENABLE_ADDITIONAL_METRICS = False
 
@@ -434,6 +438,58 @@ class DualHandsObjectTrackingCommand(CommandTerm):
             f"The number of body names in the motion file and the object do not match. "
             f"Find {len(self.retargeted_object_body_names)} in motion file, "
             f"but {self.num_bodies} in the object."
+        )
+        self._init_reference_motion_scale()
+
+    def _init_reference_motion_scale(self) -> None:
+        """Measure how far the reference actually moves the object.
+
+        Reward variances and "object left the trajectory" thresholds are
+        otherwise absolute constants sized for mocap sequences, where the object
+        travels tens of centimetres.  On a short clip they stop discriminating:
+        if the whole demonstration spans less than the termination threshold,
+        then never moving the object at all still counts as following it.
+
+        Stores two scalars, both start-frame independent so they stay valid
+        under the random-frame resets in ``_resample_command``:
+
+          - ``reference_object_travel`` — the diameter of the object's
+            positional trajectory, i.e. the largest distance between any two
+            frames, maximised over bodies (metres).
+          - ``reference_object_rotation`` — the same for orientation, as a
+            geodesic angle (radians).
+
+        Consumers pass ``var=None`` / ``threshold=None`` to derive their
+        constant from these instead of hardcoding one.
+        """
+        # Both measures are O(T^2) in memory; subsample long motions, which costs
+        # nothing here because the diameter of a smooth trajectory is stable under
+        # decimation.
+        n_frames = self.retargeted_object_body_position.shape[0]
+        stride = max(1, math.ceil(n_frames / _MOTION_SCALE_MAX_SAMPLES))
+        positions = self.retargeted_object_body_position[::stride]  # (T', N_body, 3)
+        quats = self.retargeted_object_body_wxyz[::stride]  # (T', N_body, 4)
+
+        # (N_body, T', T') pairwise distances; take the largest over all of them.
+        travel = torch.cdist(
+            positions.transpose(0, 1), positions.transpose(0, 1)
+        ).amax()
+
+        # |<q_i, q_j>| -> geodesic angle; the absolute value makes it sign
+        # invariant, since q and -q are the same rotation.
+        dots = torch.einsum("ibk,jbk->bij", quats, quats).abs().clamp(max=1.0)
+        rotation = (2.0 * torch.acos(dots)).amax()
+
+        self.reference_object_travel = float(travel)
+        self.reference_object_rotation = float(rotation)
+        # print, not logger: the training entry points do not configure logging,
+        # and this number is the one a reader checks to confirm a derived
+        # var/threshold override actually took effect.
+        print(
+            f"[v2d] reference object travel {self.reference_object_travel:.4f} m, "
+            f"rotation {self.reference_object_rotation:.4f} rad "
+            f"({positions.shape[0]} of {n_frames} frames sampled)",
+            flush=True,
         )
 
     def _init_relative_object_data(self) -> None:

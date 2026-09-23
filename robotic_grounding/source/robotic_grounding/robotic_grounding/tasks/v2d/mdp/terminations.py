@@ -115,14 +115,78 @@ def object_away_from_trajectory_z(
     return object_position_z_difference > threshold
 
 
+#: Fraction of the reference motion's own extent used as the deviation budget
+#: when ``object_away_from_trajectory`` derives its thresholds, plus the floors
+#: that keep a near-static demonstration from terminating on solver noise.
+_DERIVED_THRESHOLD_FRACTION = 0.5
+_DERIVED_POSITION_FLOOR = 0.05  # metres
+_DERIVED_ORIENTATION_FLOOR = 0.2  # radians
+
+
+def _derive_away_thresholds(command) -> tuple[float, float]:
+    """Scale the "object left the trajectory" budget to how far the reference moves.
+
+    The term asks how far the object is from where the reference says it should
+    be *now*, so for a policy that never moves the object the error it sees is
+    just the reference's own displacement.  With fixed 0.2 m / 0.7 rad
+    thresholds that makes the term vacuous on any clip whose motion is smaller
+    than the threshold -- never lifting the object then reads as following the
+    trajectory perfectly, and the episode runs to timeout.
+
+    Deriving the budget as a fraction of the reference's extent keeps the term
+    meaningful at any motion scale: it reproduces roughly the 0.2 m default for
+    a ~0.4 m mocap motion, and tightens automatically for short clips.
+    """
+    cached = getattr(command, "_derived_away_thresholds", None)
+    if cached is not None:
+        return cached
+    travel = getattr(command, "reference_object_travel", None)
+    rotation = getattr(command, "reference_object_rotation", None)
+    if travel is None or rotation is None:
+        raise ValueError(
+            "threshold=None requires the command term to expose "
+            "reference_object_travel / reference_object_rotation; pass explicit "
+            "thresholds for command terms that do not."
+        )
+    derived = (
+        max(_DERIVED_THRESHOLD_FRACTION * travel, _DERIVED_POSITION_FLOOR),
+        max(_DERIVED_THRESHOLD_FRACTION * rotation, _DERIVED_ORIENTATION_FLOOR),
+    )
+    print(
+        f"[v2d] object_away_from_trajectory: derived thresholds "
+        f"{derived[0]:.4f} m / {derived[1]:.4f} rad from reference extent "
+        f"{travel:.4f} m / {rotation:.4f} rad (fixed defaults are 0.2 / 0.7)",
+        flush=True,
+    )
+    command._derived_away_thresholds = derived
+    return derived
+
+
 def object_away_from_trajectory(
     env: ManagerBasedRLEnv,
     command_name: str,
-    position_threshold: float,
-    orientation_threshold: float,
+    position_threshold: float | None,
+    orientation_threshold: float | None,
 ) -> torch.Tensor:
-    """Terminate when the object is away from the trajectory."""
+    """Terminate when the object is away from the trajectory.
+
+    Args:
+        env: The environment instance.
+        command_name: The name of the command term.
+        position_threshold: Deviation budget in metres, or ``None`` to derive it
+            from the reference motion -- see :func:`_derive_away_thresholds`.
+        orientation_threshold: The same, in radians.
+
+    Returns:
+        Tensor of shape (num_envs,) indicating whether to terminate.
+    """
     command = env.command_manager.get_term(command_name)
+    if position_threshold is None or orientation_threshold is None:
+        derived_position, derived_orientation = _derive_away_thresholds(command)
+        if position_threshold is None:
+            position_threshold = derived_position
+        if orientation_threshold is None:
+            orientation_threshold = derived_orientation
     object_position_difference = torch.norm(
         command.object_body_position_command_e - command.object_position_e,
         dim=-1,
