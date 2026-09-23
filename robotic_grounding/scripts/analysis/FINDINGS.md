@@ -349,15 +349,26 @@ video was watched eight hours later. The number that makes it obvious,
 lift ratio 0.058, only exists because a diagnostic script was written after the
 fact.
 
-**Fix** — add it as a **metric, not a reward**, so the reproduction stays
-faithful. One line in the command term's `_update_metrics`:
+**Fix — IMPLEMENTED** as a **metric, not a reward**, so the objective stays the
+paper's. `hand_object_commands.py:_update_lift_metrics` logs three values:
 
-```python
-self.metrics["object_lift_ratio"] = (
-    (self.object_position_e[:, 0, 2] - reset_object_z)
-    / (reference_z_range + 1e-6)
-).clamp(0, 2)
-```
+| metric | meaning |
+|---|---|
+| `object_lift_reference` | running max of the reference's rise above the object's height at reset (m) |
+| `object_lift_achieved` | the same for the actual object (m) |
+| `object_lift_ratio` | achieved / reference, reported as 0 until the reference has lifted at least 1 cm |
+
+Both lifts share one baseline, the object's height at reset, so they stay
+meaningful under the random-frame resets: an episode starting mid-air is scored
+on the lift remaining from there, not on the whole trajectory. Running maxima
+rather than instantaneous heights, so an episode that lifts and sets down again
+still reads as a lift. Isaac Lab reads command metrics at reset, so what lands
+in the log is the end-of-episode value.
+
+Checked against the failed policy, where the offline computation gives a lift
+ratio of 0.053-0.058: the env-side metric reports `object_lift_reference`
+0.1537 m against `object_lift_achieved` 0.0105 m, ratio 0.0656 mid-episode. A
+40-iteration training run confirms the three lines reach the console log.
 
 ### C-2. `Episode_Termination/time_out` reads as a success rate
 
@@ -475,7 +486,7 @@ To recover these numbers from the log, note that `Episode_Reward/<term>` is
 5. **A-2b: retune the virtual object controller** to `k=500, d=30`, or better,
    scale the gains with object mass. This is the only lever with an
    intervention behind it (19.2% -> 0.02% exceedance).
-6. **C-1** (log lift ratio) — without it you cannot tell whether a change helped.
+6. ~~**C-1** (log lift ratio)~~ — done; `object_lift_ratio` is in the training log.
 7. A 1,000-iteration run — does the lift ratio move?
 8. **A-2** (enable `position_threshold=null`), then **D-1**, **D-2**, **D-3**.
 9. **D-4/D-5** — re-evaluate the curriculum length only after the above.

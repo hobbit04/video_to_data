@@ -70,6 +70,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         rec["rfc"].append(f((cmd.right_hand_contact_wrench_supports.amax(dim=1) > 0.01).float().mean(-1)))
         rec["lfc"].append(f((cmd.left_hand_contact_wrench_supports.amax(dim=1) > 0.01).float().mean(-1)))
         rec["ract"].append(f(cmd.right_hand_contact_active_command > 0.5))
+        for k in ("object_lift_reference", "object_lift_achieved", "object_lift_ratio"):
+            rec.setdefault(k, []).append(f(cmd.metrics[k]))
         rec["lact"].append(f(cmd.left_hand_contact_active_command > 0.5))
     A = {k: np.array(v) for k, v in rec.items()}
     n = len(A["oz"])
@@ -77,6 +79,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     print(f"[DIAG] object z   actual  min {A['oz'].min():.4f} max {A['oz'].max():.4f} range {A['oz'].ptp():.4f} m")
     print(f"[DIAG] object z   REFERENCE min {A['ozc'].min():.4f} max {A['ozc'].max():.4f} range {A['ozc'].ptp():.4f} m")
     print(f"[DIAG] lift ratio (actual range / reference range) = {A['oz'].ptp()/max(A['ozc'].ptp(),1e-9):.3f}")
+    if "object_lift_ratio" in A:
+        # Peak, not the last sample: the env-side metric is a per-episode running
+        # maximum that resets with the episode, so reading it after the final
+        # reset returns zero.
+        print(f"[DIAG] env metric object_lift_reference (peak) = {A['object_lift_reference'].max():.4f} m")
+        print(f"[DIAG] env metric object_lift_achieved  (peak) = {A['object_lift_achieved'].max():.4f} m")
+        i = int(A['object_lift_reference'].argmax())
+        print(f"[DIAG] env metric object_lift_ratio at that step = {A['object_lift_ratio'][i]:.4f}")
     print(f"[DIAG] z(actual)-z(reference)  mean {A['dz'].mean()*100:+.2f} cm  p5 {np.percentile(A['dz'],5)*100:+.2f}  min {A['dz'].min()*100:+.2f} cm")
     print(f"[DIAG] steps more than 3cm BELOW reference: {(A['dz'] < -0.03).mean()*100:.1f}%")
     for nm, k in (("RIGHT wrist err", "rwe"), ("LEFT  wrist err", "lwe")):

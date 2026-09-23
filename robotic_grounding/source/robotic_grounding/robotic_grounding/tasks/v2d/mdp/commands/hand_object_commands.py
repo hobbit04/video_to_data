@@ -40,6 +40,10 @@ if TYPE_CHECKING:
 #: Cap on frames used for the O(T^2) reference-motion-scale measurement.
 _MOTION_SCALE_MAX_SAMPLES = 2000
 
+#: Demonstrated lift (metres) below which ``object_lift_ratio`` is reported as 0
+#: rather than dividing by a reference that has not raised the object yet.
+_LIFT_RATIO_MIN_REFERENCE = 0.01
+
 ENABLE_ADDITIONAL_METRICS = False
 
 
@@ -947,6 +951,11 @@ class DualHandsObjectTrackingCommand(CommandTerm):
             device=self.device,
         )
 
+        # Per-episode baseline and running maxima for the lift metrics.
+        self.reset_object_z = torch.zeros(self.num_envs, device=self.device)
+        self.max_reference_lift = torch.zeros(self.num_envs, device=self.device)
+        self.max_achieved_lift = torch.zeros(self.num_envs, device=self.device)
+
     def _init_metrics(self, cfg: CommandTermCfg) -> None:
         """Initialize all tracking-error metric buffers to zero.
 
@@ -954,6 +963,8 @@ class DualHandsObjectTrackingCommand(CommandTerm):
         finger joint errors, object body pose errors, object articulation
         errors, and the virtual object controller scale factor.
         """
+        for name in ("object_lift_reference", "object_lift_achieved", "object_lift_ratio"):
+            self.metrics[name] = torch.zeros(self.num_envs, device=self.device)
         for side in ["right", "left"]:
             self.metrics[f"{side}_hand_wrist_position_error"] = torch.zeros(
                 self.num_envs, device=self.device
@@ -1945,6 +1956,46 @@ class DualHandsObjectTrackingCommand(CommandTerm):
             self.metrics["relative_object_pos_error"] = pos_err
             self.metrics["relative_object_rot_error"] = rot_err
 
+        self._update_lift_metrics()
+
+    def _update_lift_metrics(self) -> None:
+        """Track how much of the demonstrated lift the policy actually reproduces.
+
+        Every other metric here is a tracking *error*, which on a short clip
+        cannot separate "picked the object up and followed it" from "left it on
+        the table": the reference's whole excursion can be smaller than the
+        errors the environment produces anyway.  This asks the task's own
+        question instead -- did the object come up? -- and it is deliberately a
+        metric, not a reward, so the objective stays the paper's.
+
+        Both numerator and denominator are measured from the same per-episode
+        baseline, the object's height at reset, so they stay meaningful under the
+        random-frame resets: an episode starting mid-air is scored on the lift
+        remaining from that point, not on the whole trajectory.  Running maxima
+        rather than instantaneous heights, because an episode that lifts and sets
+        down again should still read as a lift.
+
+        Reported for object body 0; multi-body motions would want a per-body
+        formulation.
+        """
+        reference_lift = (
+            self.object_body_position_command_e[:, 0, 2] - self.reset_object_z
+        )
+        achieved_lift = self.object_position_e[:, 0, 2] - self.reset_object_z
+        torch.maximum(self.max_reference_lift, reference_lift, out=self.max_reference_lift)
+        torch.maximum(self.max_achieved_lift, achieved_lift, out=self.max_achieved_lift)
+
+        self.metrics["object_lift_reference"] = self.max_reference_lift.clone()
+        self.metrics["object_lift_achieved"] = self.max_achieved_lift.clone()
+        # Guard the denominator: until the reference has actually raised the
+        # object, the ratio is not a question worth asking, and dividing by a
+        # near-zero demonstrated lift would report noise as success.
+        self.metrics["object_lift_ratio"] = torch.where(
+            self.max_reference_lift > _LIFT_RATIO_MIN_REFERENCE,
+            self.max_achieved_lift / self.max_reference_lift.clamp(min=1e-6),
+            torch.zeros_like(self.max_achieved_lift),
+        ).clamp(-1.0, 2.0)
+
     def _resample_command(self, env_ids: Sequence[int]) -> None:
         """Resample the command."""
         n = len(env_ids)
@@ -1989,6 +2040,15 @@ class DualHandsObjectTrackingCommand(CommandTerm):
         self.tracking_lengths[env_ids] = (self.retargeted_horizon - tc).clamp(min=1)
         self.virtual_object_controller_scale_factor_per_env[env_ids] = 1.0
         self.steps_since_last_reset[env_ids] = 0
+
+        # Baseline for the lift metrics.  The object is written to the reference
+        # pose just below, so the reference height at the reset frame is also the
+        # object's actual starting height, and both lifts share one origin.
+        self.reset_object_z[env_ids] = self.retargeted_object_body_position[
+            tc, 0, 2
+        ].float()
+        self.max_reference_lift[env_ids] = 0.0
+        self.max_achieved_lift[env_ids] = 0.0
 
         # ── JIT-compiled pure-tensor derivations (indexing, cat, rand, clamp) ──
         (
