@@ -88,6 +88,32 @@ and optimisation removes most of what is left. A fix has to address both: the
 exploration scale relative to what a grasp tolerates, and an objective under
 which moving the object is not the risky choice.
 
+### More iterations make it worse, with or without VOC
+
+The 8 h run kept 22 checkpoints, so its lift trajectory can be recovered after
+the fact even though it predates the metric. Replaying each through
+`diag_policy.py`:
+
+| iteration | 200 | 600 | 1200 | **2000** | 2800 | 3400 | 3800 | 4078 |
+|---|---|---|---|---|---|---|---|---|
+| `object_lift_achieved` | 0.0091 | 0.0198 | 0.0214 | **0.0221 m** | 0.0140 | 0.0112 | 0.0123 | **0.0115 m** |
+| of the reference's 0.1537 m | 5.9% | 12.9% | 13.9% | **14.4%** | 9.1% | 7.3% | 8.0% | **7.5%** |
+
+It peaks at iteration 2000 and **halves over the remaining 2000 iterations**.
+That run had VOC throughout, so the answer to "would VOC plus a longer run help"
+is already on disk: it was tried, and the second half of it destroyed what the
+first half built. The no-VOC run shows the same shape without a curriculum.
+More optimisation moves further along a trajectory that leads away from lifting,
+which is what the -0.78 lift/reward correlation says.
+
+And the peak is not close either: 0.0221 m against the 0.1045 m zero actions
+reach from frame 0. **The best checkpoint of any run is about five times worse
+than not acting.** Extending any of these runs is not the lever.
+
+(Caveat: those checkpoints trained on the pre-B-1 reference and are replayed
+here against the de-penetrated one, so the absolute values carry a small offset.
+The trend within the run does not.)
+
 The next experiments, in order of how much they would tell us:
 
 1. **Behaviour cloning / residual regularisation toward zero.** The
@@ -538,7 +564,12 @@ weight-normalised rewards plateau at iteration ~900 and stay flat within each
 curriculum stage, so there is little evidence more iterations would have helped.
 Re-evaluate after A and B.
 
-### D-5. Do not raise the iteration budget
+### D-5. Do not raise the iteration budget — SUPERSEDED by F-1
+
+**Superseded.** The plateau this section reads at iteration ~900 happened at a
+learning rate 30–100× below nominal (F-1), and the stock curriculum is written
+for 20,000 iterations. The full-length run is
+`train_tissue_box_stock_20k.sh`. The original argument is kept below.
 
 The stock schedule implies 20,000 iterations (≈39 h here) and there is no
 evidence for it. `force_closure` peaks at 0.690 around iteration 900 and drifts
@@ -561,6 +592,102 @@ To recover these numbers from the log, note that `Episode_Reward/<term>` is
 | `scripts/rsl_rl/eval.py` | does not clamp `viewer.env_index = 6`, so `--num_envs < 7` always fails | port the two lines from `dummy_agent.py:204-207` |
 | `reconstruction/modules/v2d_pipelines/run_ego_wilor.py` | `_step("Package result/", ...)` skips when `result/` exists, so **gsplat-refined poses never reach the bundle** | re-package when refinement ran |
 | `reconstruction/modules/v2d_task_library_loader/lib/level_result_bundle.py` | axis evaluation and application each run the same 90k-rotation brute force (4 min × 2) | cache the search, or build `--up_rank` comparison in |
+
+---
+
+## F. Optimiser and paper-scale findings (added after the VOC-off run)
+
+Measured from the TensorBoard logs of all four runs and from the CHORD paper
+(`docs/chord/chord.pdf`), after section 0 established that zero actions beat
+every trained policy.
+
+### F-1. The adaptive-KL schedule pins the learning rate at its floor
+
+**Default** — `rsl_rl_ppo_cfg.py` sets `learning_rate=1e-3, schedule="adaptive",
+desired_kl=0.005`. rsl_rl's rule: if the mini-batch KL exceeds `2 × desired_kl`
+the learning rate is divided by 1.5 (floor `1e-5`); below `desired_kl / 2` it is
+multiplied by 1.5.
+
+**What happened** — the learning rate collapsed at iteration 0 and never
+recovered, in every run:
+
+| run | nominal | iteration 0 | median | max | fraction of iterations at the 1e-5 floor |
+|---|---|---|---|---|---|
+| 8 h (4079 it) | 1e-3 | 1.0e-5 | **1.5e-5** | 3.8e-4 | **45%** |
+| VOC-off 1500 | 1e-3 | 1.0e-5 | **1.5e-5** | 3.8e-4 | **46%** |
+
+**Why** — the KL budget is per policy, and the policy has 56 action dimensions
+with `std = 0.1`. For a diagonal Gaussian with equal std, KL per dimension is
+`Δμ² / (2σ²)`, so a mean shift of 0.01 in every dimension is already 0.28 nats
+against a ceiling of 0.01. The schedule therefore allows about 0.002 of mean
+movement per dimension per update, whatever the nominal learning rate says.
+This is the stock configuration and presumably why the stock recipe budgets
+20,000 iterations.
+
+**Consequence** — the 1,500–4,079-iteration runs used 8–20% of the stock
+budget at 1/30–1/100 of the nominal step size. D-5's "plateau at 900" was read
+inside that regime. It also sharpens section 0: the walk away from zero action
+happened at a tiny step size, so it is a consistent gradient direction, not
+optimiser noise.
+
+### F-2. The action noise std is learned and drifts upward in every run
+
+**Default** — `init_noise_std=0.1`, `noise_std_type="scalar"`: the std is an
+`nn.Parameter`, and `entropy_coef=0.001` rewards growing it.
+
+| run | std at iteration 0 | std at end | entropy start → end |
+|---|---|---|---|
+| 8 h | 0.102 | **0.186** | −48.6 → −16.1 |
+| lift_1500 | 0.102 | 0.137 | −48.7 → −32.5 |
+| wrench_1500 | 0.102 | 0.138 | −48.7 → −32.4 |
+| VOC-off 1500 | 0.101 | 0.128 | −49.1 → −36.4 |
+
+Growth is monotonic in all four. Section 0 measured `init_noise_std=0.1`
+costing 61% of the zero-action lift *before the first gradient step*; by the
+end of the 8 h run the perturbation was 1.86× larger. Adam's step is roughly
+the learning rate regardless of gradient magnitude, so with the surrogate
+gradient on the std near zero the entropy term's constant sign wins.
+
+**Lever, no source change** — `agent.policy.init_noise_std=0.03` (or
+`agent.algorithm.entropy_coef=0.0`) on the command line. Verified with a
+2-iteration smoke that the override reaches the runner
+(`Mean action noise std: 0.03`).
+
+### F-3. The paper's own success metric cannot fail this clip
+
+The paper (Sec. 4.1) defines a successful rollout as one that completes
+"without object-centric termination, defined by position error above 15 cm or
+rotation error above 40°", and a task as solved at completion ratio > 0.7.
+This clip's reference travel is 15.4 cm and 5.5°. A policy that never moves
+the box only reaches a 15.5 cm error at the very last frame, so **under the
+paper's metric the failed 8 h policy, at 95.8% timeout, is a solved task**.
+The stock thresholds (0.2 m / 0.7 rad, A-2) are looser still. This is not a
+bug in the code; the benchmark was scaled for mocap motions of tens of
+centimetres, and a 15 cm clip sits below its resolution. It is the same fact as
+A-1 and A-2 seen from the paper's side.
+
+### F-4. Recipe gaps between the paper and this repository
+
+| paper (Appendix B) | repository |
+|---|---|
+| FlashSAC, 2048 envs, ~2 h on an L40S | `rsl_rl` ships PPO and Distillation only; stock PPO is 20,000 it × 4096 envs × 24 steps ≈ 1.97 B env-steps. The 8 h run was 401 M (20%). |
+| Objects perturbed with wrenches sampled from the human contact matrix (Sec. 3.2) | not implemented — no such event term in `tasks/v2d` |
+| Force-closure objective when contact estimates are noisy (ego video) | shipped as `force_closure`; this clip's contacts were measured clean (`contact_quality.py`), so the wrench reward is used |
+| Reset to random frame, 20-step VOC warm-up, action scales 0.05/0.15/0.15, EMA 0.3, three terminations | match |
+
+### F-5. How much was actually modified
+
+Against upstream `1b22145f`, the changes to task source are `rewards.py`
+(+59), `terminations.py` (+70) and `hand_object_commands.py` (+116). All are
+opt-in (`var=None`, `threshold=None`) or metric-only (`object_lift_*`); the
+stock behaviour is unchanged unless a flag is passed. `filter_penetrations.py`
+and `data_assessor.py` are QC correctness fixes (B-2). Everything else is
+analysis scripts and re-retargeted assets. **The stock recipe has never been
+run at its own length on this clip**; that is what
+`train_tissue_box_stock_20k.sh` does.
+
+Measured by `read_tb.py`-style dumps of `Loss/learning_rate`,
+`Policy/mean_noise_std`, `Loss/entropy`.
 
 ---
 
@@ -594,7 +721,12 @@ To recover these numbers from the log, note that `Episode_Reward/<term>` is
    monotonically from 0.195 while the reward rose from 7.5 to 262. See
    section 0 for what it established instead and what to try next.
 10. **A-2** (enable `position_threshold=null`), then **D-1**, **D-2**, **D-3**.
-11. **D-4/D-5** — re-evaluate the curriculum length only after the above.
+11. ~~**D-4/D-5** — re-evaluate the curriculum length only after the above.~~
+    Superseded by F.
+12. **F: the stock 20,000-iteration run** — `train_tissue_box_stock_20k.sh`,
+    stock curriculum, one copy per GPU: stock `init_noise_std=0.1` on one,
+    `0.03` on the other. Read the lift ratio over iterations 14,000–20,000,
+    where VOC is 0 in the stock schedule.
 
 Steps 1–4 are configuration changes and added observability only, so the run
 remains a faithful CHORD reproduction. D-2 is the sole reward-function change
