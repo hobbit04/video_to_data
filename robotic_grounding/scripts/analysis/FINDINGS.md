@@ -48,13 +48,58 @@ against the 0.757 the trained policy reaches. **Zero actions score higher on the
 objective than the policy PPO converged to.** Widening the reward band was not
 wrong, but it was never the binding constraint.
 
-The most likely mechanism, untested: `init_noise_std` 0.1 means the policy does
-not start at zero action, and the VOC curriculum holds the object up through
-exactly the phase where behaviour forms -- so the cost of perturbing the grasp
-is hidden until VOC decays, by which point the policy has settled into residuals
-tuned for contact rewards that do not hold the box. The experiment is a run with
-VOC at 0 from the start, or a far shorter VOC phase, checking whether the lift
-ratio stays near 0.66 instead of collapsing to 0.05.
+### The curriculum is not what breaks it, and the objective is
+
+Re-run with VOC at 0 from iteration 0, everything else held fixed against the
+contact-wrench run. The lift starts near the zero-action level and is optimised
+away:
+
+| iteration | 4 | 100 | 200 | 300 | 500 | 1000 | 1499 |
+|---|---|---|---|---|---|---|---|
+| `object_lift_ratio` | **0.195** | 0.089 | 0.064 | 0.033 | 0.022 | 0.026 | **0.024** |
+| `objAway` | 0.275 | 0.563 | 0.546 | 0.469 | 0.255 | 0.229 | **0.109** |
+| mean reward | 7.5 | 17.8 | 24.8 | 33.0 | 42.7 | 90.3 | **262.1** |
+| object error | — | 6.87 | 8.58 cm | 6.80 | 4.88 | 5.29 | **3.74 cm** |
+
+Final policy: lift ratio **0.044** from frame 0, the worst of the four runs.
+
+**PPO improves its objective monotonically while destroying the lift
+monotonically.** Over the run, `object_lift_ratio` correlates with mean reward
+at **-0.78** (Spearman) and with `objAway` at **+0.83**. Nothing here is a
+curriculum artefact; there was no curriculum.
+
+The `objAway` correlation is the mechanism. The termination meant to catch
+failure instead teaches the policy to keep the object still: lifting a 0.3 kg box
+with an imperfect grasp is the single most likely way to displace it past the
+threshold, and a termination costs the whole remaining reward stream. The policy
+drove `objAway` from 0.56 to 0.11 over the run, and the lift went with it. It
+did not fail to learn -- it learned that holding the box down is safe.
+
+Two separate losses, both measured:
+
+| | lift ratio | lost to |
+|---|---|---|
+| zero actions | 0.238 | — |
+| policy at initialisation | ~0.092 | `init_noise_std` 0.1 perturbing a working grasp (-61%) |
+| policy after training | 0.019 | the objective (-79%) |
+
+So `init_noise_std` costs more than half the lift before a single gradient step,
+and optimisation removes most of what is left. A fix has to address both: the
+exploration scale relative to what a grasp tolerates, and an objective under
+which moving the object is not the risky choice.
+
+The next experiments, in order of how much they would tell us:
+
+1. **Behaviour cloning / residual regularisation toward zero.** The
+   demonstration already solves the task. Penalise the residual, or initialise
+   and anchor the policy at zero action, so optimisation has to earn its
+   departure from a working solution.
+2. **Drop or invert `object_away_from_trajectory`.** It is currently a
+   don't-touch-the-object incentive. A lift-based termination (the object failed
+   to leave the table by the frame the reference does) inverts the sign.
+3. **Shrink `init_noise_std` and the residual scales.** 0.1 on 56 dimensions with
+   5 cm wrist and 0.15 rad finger scales is large next to the tolerance of a
+   two-handed grasp on a 20 cm box.
 
 Measured by `diag_voc.py --voc 0.0 --first_frame --disable_away` and
 `../rsl_rl/diag_policy.py`.
@@ -544,9 +589,10 @@ To recover these numbers from the log, note that `Episode_Reward/<term>` is
    left/right asymmetry of D-2 (wrench support 0.488 / 0.488, against
    0.493 / 0.743 under force_closure) and put both wrists within 1 cm of their
    reference offset, so the grasp got better while the lift did not.
-9. **Run with VOC off from the start** — see section 0. Every reward-side fix so
-   far has been aimed at a policy that is already far worse than zero actions.
-   Was: turn on `contact_wrench_support_reward`
+9. ~~**Run with VOC off from the start**~~ — done, and it refutes the curriculum
+   hypothesis: lift ratio 0.044, the worst of the four runs, decaying
+   monotonically from 0.195 while the reward rose from 7.5 to 262. See
+   section 0 for what it established instead and what to try next.
 10. **A-2** (enable `position_threshold=null`), then **D-1**, **D-2**, **D-3**.
 11. **D-4/D-5** — re-evaluate the curriculum length only after the above.
 
