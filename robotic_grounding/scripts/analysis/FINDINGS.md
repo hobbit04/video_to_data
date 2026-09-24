@@ -17,6 +17,50 @@ while this clip's entire motion is 15.4 cm.
 
 ---
 
+## 0. The result that reframes everything: zero actions beat every trained policy
+
+Measured late, after A-1, B-1, C-1 and the contact-wrench run. The action space
+is a **residual** on top of reference tracking, so a zero action means "track the
+demonstration exactly". Replaying that with the virtual controller fully off:
+
+| | lift ratio, VOC = 0, from frame 0 |
+|---|---|
+| **zero actions, de-penetrated reference** | **0.664** (0.1045 m of 0.1537 m) |
+| zero actions, original reference | 0.590 |
+| trained: 8 h, force_closure | 0.058 |
+| trained: 1500, force_closure, after A-1 + B-1 | 0.057 |
+| trained: 1500, contact wrench guidance | 0.051 |
+
+**The demonstration lifts the box unaided. Every policy trained on it is more
+than ten times worse than doing nothing.** The environment, the assets, the
+friction and the retargeted grasp are all adequate; a solution sits at the
+origin of the action space, and PPO walks away from it.
+
+That inverts the reading of everything below. Sections A-D explain why the
+reward does not *reward* lifting; the harder question this raises is why it
+rewards something that actively *breaks* a grasp that already works.
+
+It also corrects A-1's framing. The "do-nothing" baseline used there is a box
+frozen at frame 0 scoring 0.7851, but that is not what a zero-action policy
+does -- it lifts. With a p50 object deviation of 2.78 cm under zero actions,
+`exp(-0.0278^2 / 0.0243)` puts the real zero-action keypoint reward near 0.97,
+against the 0.757 the trained policy reaches. **Zero actions score higher on the
+objective than the policy PPO converged to.** Widening the reward band was not
+wrong, but it was never the binding constraint.
+
+The most likely mechanism, untested: `init_noise_std` 0.1 means the policy does
+not start at zero action, and the VOC curriculum holds the object up through
+exactly the phase where behaviour forms -- so the cost of perturbing the grasp
+is hidden until VOC decays, by which point the policy has settled into residuals
+tuned for contact rewards that do not hold the box. The experiment is a run with
+VOC at 0 from the start, or a far shorter VOC phase, checking whether the lift
+ratio stays near 0.66 instead of collapsing to 0.05.
+
+Measured by `diag_voc.py --voc 0.0 --first_frame --disable_away` and
+`../rsl_rl/diag_policy.py`.
+
+---
+
 ## A. Absolute constants fixed at mocap scale — primary cause
 
 ### A-1. `object_keypoints_tracking_exp.var = 0.1`
@@ -494,15 +538,17 @@ To recover these numbers from the log, note that `Episode_Reward/<term>` is
    threshold more often without ever lifting it. Caveat: 1500 iterations is
    2.7x fewer than the 8 h run and the curriculum shape differs, so this bounds
    the effect of A-1 + B-1 rather than measuring it exactly.
-8. **Turn on `contact_wrench_support_reward`** — the paper's core reward, at
-   weight 0.0 in every run so far. The README zeroes it for monocular data as
-   too noisy, but measured on this reference after refinement and
-   de-penetration, 91.6% (right) / 84.8% (left) of contact points sit within
-   5 mm of the object surface, normals are all unit length, and the active
-   contact set flips only 0.1-0.2 links per frame. See
-   `train_tissue_box_wrench_1500.sh`.
-9. **A-2** (enable `position_threshold=null`), then **D-1**, **D-2**, **D-3**.
-10. **D-4/D-5** — re-evaluate the curriculum length only after the above.
+8. ~~**Turn on `contact_wrench_support_reward`**~~ — done; lift ratio 0.051,
+   and the wrench reward itself plateaus at 0.30 of its ceiling within ~100
+   iterations and never moves again over the remaining 1400. It did fix the
+   left/right asymmetry of D-2 (wrench support 0.488 / 0.488, against
+   0.493 / 0.743 under force_closure) and put both wrists within 1 cm of their
+   reference offset, so the grasp got better while the lift did not.
+9. **Run with VOC off from the start** — see section 0. Every reward-side fix so
+   far has been aimed at a policy that is already far worse than zero actions.
+   Was: turn on `contact_wrench_support_reward`
+10. **A-2** (enable `position_threshold=null`), then **D-1**, **D-2**, **D-3**.
+11. **D-4/D-5** — re-evaluate the curriculum length only after the above.
 
 Steps 1–4 are configuration changes and added observability only, so the run
 remains a faithful CHORD reproduction. D-2 is the sole reward-function change

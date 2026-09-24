@@ -75,7 +75,7 @@ act = torch.zeros(env.action_space.shape, device=env.device)
 tm = env.termination_manager
 n_pos = n_ori = n_both = 0
 counts = {k: 0 for k in tm.active_terms}
-pos_hi = []; ori_hi = []; pos_all = []; ori_all = []; age_all = []; pos_mean = []
+pos_hi = []; ori_hi = []; pos_all = []; ori_all = []; age_all = []; pos_mean = []; lift_rec = {}
 for step in range(a.steps):
     with torch.inference_mode():
         env.step(act)
@@ -83,6 +83,8 @@ for step in range(a.steps):
     dori = math_utils.quat_error_magnitude(cmd.object_orientation_e, cmd.object_body_wxyz_command_e)
     if dori.dim() > 1: dori = dori.max(dim=-1).values
     pos_hi.append(dpos.max().item()); ori_hi.append(dori.max().item()); pos_mean.append(dpos.mean().item())
+    for _k in ("object_lift_reference", "object_lift_achieved", "object_lift_ratio"):
+        lift_rec.setdefault(_k, []).append(float(cmd.metrics[_k].mean().item()))
     pos_all.append(dpos.cpu()); ori_all.append(dori.cpu())
     age_all.append(cmd.steps_since_last_reset.flatten().cpu().clone())
     for k in tm.active_terms:
@@ -99,6 +101,11 @@ print("[DIAG] FINAL", counts, "objAway pos-only/ori-only/both =", n_pos, n_ori, 
 import numpy as np
 print(f"[DIAG] dpos p50/p95/p99/max = {np.percentile(pos_hi,50):.4f}/{np.percentile(pos_hi,95):.4f}/{np.percentile(pos_hi,99):.4f}/{max(pos_hi):.4f} m", flush=True)
 np.save("out/diag_voc_pos_mean.npy", np.array(pos_mean))
+if lift_rec:
+    _lr = np.array(lift_rec["object_lift_reference"]); _la = np.array(lift_rec["object_lift_achieved"])
+    print(f"[DIAG] LIFT reference peak {_lr.max():.4f} m   achieved peak {_la.max():.4f} m", flush=True)
+    _i = int(_lr.argmax())
+    print(f"[DIAG] LIFT ratio at peak reference = {np.array(lift_rec['object_lift_ratio'])[_i]:.4f}", flush=True)
 print(f"[DIAG] dori p50/p95/p99/max = {np.percentile(ori_hi,50):.4f}/{np.percentile(ori_hi,95):.4f}/{np.percentile(ori_hi,99):.4f}/{max(ori_hi):.4f} rad", flush=True)
 pa = torch.cat(pos_all).numpy(); oa_ = torch.cat(ori_all).numpy()
 print(f"[DIAG] PER-ENV dpos p50/p90/p99/p99.9/max = "
