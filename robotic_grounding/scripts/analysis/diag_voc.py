@@ -23,6 +23,12 @@ p.add_argument("--disable_away", action="store_true",
 p.add_argument("--derive_thresholds", action="store_true",
                help="Set object_away_from_trajectory thresholds to None so they are derived "
                     "from the reference motion (A-2), instead of the fixed 0.2 m / 0.7 rad.")
+p.add_argument("--lift_term", action="store_true",
+               help="Enable the object_lift_failed termination (reference lifted, object did not) "
+                    "to count how many zero-action episodes it would cut short.")
+p.add_argument("--position_threshold", type=float, default=None,
+               help="Override object_away_from_trajectory.position_threshold (m), e.g. 0.05, "
+                    "to count how many zero-action episodes a candidate threshold would terminate.")
 AppLauncher.add_app_launcher_args(p)
 a = p.parse_args()
 app = AppLauncher(a).app
@@ -55,10 +61,15 @@ if a.no_hand_object_collisions and hasattr(cfg.events, "setup_collision_groups")
     print("[DIAG] robot-to-object collisions DISABLED", flush=True)
 if a.disable_away:
     cfg.terminations.object_away_from_trajectory = None
+if a.lift_term:
+    cfg.terminations.object_lift_failed.params["enabled"] = True
+if a.position_threshold is not None:
+    cfg.terminations.object_away_from_trajectory.params["position_threshold"] = a.position_threshold
 if a.derive_thresholds:
     _p = cfg.terminations.object_away_from_trajectory.params
     _p["position_threshold"] = None
     _p["orientation_threshold"] = None
+_thr_pos = (cfg.terminations.object_away_from_trajectory.params.get("position_threshold") or 0.2) if cfg.terminations.object_away_from_trajectory is not None else 0.2
 env = gym.make(a.task, cfg=cfg).unwrapped
 env.reset()
 cmd = env.command_manager.get_term("dual_hands_object_tracking_command")
@@ -89,10 +100,18 @@ for step in range(a.steps):
     age_all.append(cmd.steps_since_last_reset.flatten().cpu().clone())
     for k in tm.active_terms:
         counts[k] += int(tm.get_term(k).sum().item())
+    if (step + 1) in (1, 2, 3, 5, 10) or (step + 1) % 25 == 0:
+        _rl = cmd.max_reference_lift; _al = cmd.max_achieved_lift; _age = cmd.steps_since_last_reset.flatten()
+        _on = _rl >= 0.05
+        _fail = (_on & (_al < 0.3 * _rl)).float().sum().item()
+        _young = ((_age < 3) & (_rl > 0.12)).sum().item()
+        print(f"[LIFTPROF] step {step+1:4d}  ref mean/max {_rl.mean():.4f}/{_rl.max():.4f}  ach mean {_al.mean():.4f}  "
+              f"envs ref>=5cm {int(_on.sum())}  of which ach<0.3ref {int(_fail)}  "
+              f"young(<3 steps)&ref>12cm {int(_young)}", flush=True)
     oa = tm.get_term("object_away_from_trajectory") if "object_away_from_trajectory" in tm.active_terms else None
     if oa is not None and oa.any():
         m = oa
-        pv = (dpos[m] > 0.2); ov = (dori[m] > 0.7)
+        pv = (dpos[m] > _thr_pos); ov = (dori[m] > 0.7)
         n_pos += int((pv & ~ov).sum()); n_ori += int((ov & ~pv).sum()); n_both += int((pv & ov).sum())
     if (step + 1) % 100 == 0:
         print(f"[DIAG] step {step+1}  counts={counts}  objAway(pos/ori/both)={n_pos}/{n_ori}/{n_both}"

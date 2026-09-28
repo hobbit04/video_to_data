@@ -317,6 +317,22 @@ class TerminationsCfg:
         },
     )
 
+    # Off by default (enabled=False returns all-False, so the shipped behaviour is
+    # unchanged). Terminates when the reference has lifted the object and the
+    # policy has not -- a lift-based failure signal for short clips where the
+    # deviation-based term above cannot separate a non-lift from a noisy carry.
+    # Enable per run with env.terminations.object_lift_failed.params.enabled=true.
+    object_lift_failed = DoneTerm(
+        func=mdp.ObjectLiftFailed,
+        params={
+            "command_name": "dual_hands_object_tracking_command",
+            "reference_lift_min": 0.05,
+            "achieved_lift_ratio_min": 0.3,
+            "lag_steps": 40,
+            "enabled": False,
+        },
+    )
+
 
 @configclass
 class FixedTimestepCurriculumCfg:

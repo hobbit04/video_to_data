@@ -288,6 +288,28 @@ Note the orientation channel is separately under-damped — `K=10`, `D=0.1`,
 ringing. The derived 0.2 rad floor keeps that from terminating episodes, but it
 is worth fixing on its own.
 
+**A flat 5 cm threshold, measured (added during the stock 20k run).** With
+`--position_threshold 0.05` actually enforced, zero actions from random start
+frames, 512 envs × 700 steps, on the de-penetrated sequence:
+
+| VOC | `object_away` terminations | `time_out` | fraction terminated early |
+|---|---|---|---|
+| 1.0 (curriculum phase) | 3457 | 1493 | **70%** |
+| 0.0 (unaided) | 3441 | 1513 | **69%** |
+
+The demonstration itself is cut short seven times in ten, identically with the
+controller on or off -- the same "it is the hands" result as above. A flat
+5 cm from iteration 0 would therefore pay the −100 termination penalty and
+forfeit the reward stream on most episodes of the very behaviour it is meant to
+reward, and the cheapest way to avoid that is to not touch the object. Note the
+per-step `threshold X -> Y% exceed` sweep in that log is not meaningful when
+the term is active, since deviations are capped at the threshold by the reset.
+The stock curriculum can schedule
+`termination_object_away_from_trajectory_position_threshold` per step, so a
+tightening confined to the VOC = 0 phase needs no source change, but by this
+measurement the noise floor there is the same. Measured by
+`diag_voc.py --position_threshold 0.05 --voc {1.0,0.0}`.
+
 Recommended order: reduce the penetration (B-1), re-run
 `diag_voc.py --disable_away` to confirm the floor has dropped, then enable
 `position_threshold=null`.
@@ -675,7 +697,51 @@ A-1 and A-2 seen from the paper's side.
 | Force-closure objective when contact estimates are noisy (ego video) | shipped as `force_closure`; this clip's contacts were measured clean (`contact_quality.py`), so the wrench reward is used |
 | Reset to random frame, 20-step VOC warm-up, action scales 0.05/0.15/0.15, EMA 0.3, three terminations | match |
 
-### F-5. How much was actually modified
+### F-5. A lift-based termination, and two facts measured on the way
+
+Following section 0's item 2, `terminations.py:ObjectLiftFailed` terminates
+when the reference has lifted the object and the policy has not. Both sides
+are running-max rises above the object's height at reset (the `object_lift_*`
+buffers), and the reference side is **lagged by `lag_steps` (40 env steps,
+2 s)** through a ring buffer, because the demonstration's own box rises late:
+
+| step (zero actions, VOC 0, from frame 0) | reference rise | achieved rise (mean) | envs below 0.3 × reference |
+|---|---|---|---|
+| 175 | 2.9 cm | 1.5 cm | — (reference under 5 cm) |
+| 200 | 7.1 cm | 2.0 cm | **366 / 512 (71%)** |
+| 225 | 9.5 cm | 4.1 cm | 18 (3.5%) |
+| 250 | 13.3 cm | 6.1 cm | 5 (1%) |
+| 275 | 15.2 cm | 8.9 cm | 0 |
+| 325+ | 15.4 cm | 10.4 cm | 0 |
+
+An un-lagged check cut 77% of demonstration episodes short. With the lag,
+`reference_lift_min=0.05`, `achieved_lift_ratio_min=0.3`, zero actions,
+512 envs × 700 steps:
+
+| condition | `object_lift_failed` | `time_out` | terminated early |
+|---|---|---|---|
+| VOC 0, from frame 0 (the demonstration) | **1** | 503 | 0.2% |
+| VOC 0, random starts | 317 | 1132 | 22% |
+| VOC 1.0, random starts | 320 | 1091 | 23% |
+
+The demonstration passes; the random-start terminations are real drops
+(zero-action lift ratio 0.25 in that regime), which is the signal the term
+exists to provide. It is off by default (`enabled=False`) so the shipped
+configuration is unchanged; `train_tissue_box_liftterm_20k.sh` enables it and
+is otherwise the stock 20k recipe.
+
+**The VOC does not carry the box on this clip.** At VOC = 1.0 with zero
+actions and random starts the lift ratio at peak reference is **0.27**, and a
+third of the envs whose reference has risen 5 cm are below 0.3 × reference.
+The same A-2 force budget explains it: the hands' 60 N wrench overpowers the
+controller's 1.5 N at 3 cm. So "the curriculum lifts the object for the policy"
+is false here, and the stock run's lift ratio of 0.17-0.26 during its VOC = 1
+phase was the assisted ceiling, not a policy achievement. The lift termination
+is therefore live from iteration 0.
+
+Measured by `diag_voc.py --lift_term` and its `[LIFTPROF]` lines.
+
+### F-6. How much was actually modified
 
 Against upstream `1b22145f`, the changes to task source are `rewards.py`
 (+59), `terminations.py` (+70) and `hand_object_commands.py` (+116). All are
@@ -726,7 +792,14 @@ Measured by `read_tb.py`-style dumps of `Loss/learning_rate`,
 12. **F: the stock 20,000-iteration run** — `train_tissue_box_stock_20k.sh`,
     stock curriculum, one copy per GPU: stock `init_noise_std=0.1` on one,
     `0.03` on the other. Read the lift ratio over iterations 14,000–20,000,
-    where VOC is 0 in the stock schedule.
+    where VOC is 0 in the stock schedule. *Running (GPU 6, stock arm); the
+    0.03 arm was stopped at 5,700 because its std had drifted back to 0.127
+    (F-2 confirmed: init alone does not hold).*
+13. **F-5: the lift-based termination** — `train_tissue_box_liftterm_20k.sh`,
+    stock recipe + `object_lift_failed` enabled. *Running (GPU 7).* Compare
+    `object_lift_ratio` against the stock arm; watch
+    `Episode_Termination/object_lift_failed` fall as the policy learns to lift
+    rather than to avoid contact.
 
 Steps 1–4 are configuration changes and added observability only, so the run
 remains a faithful CHORD reproduction. D-2 is the sole reward-function change

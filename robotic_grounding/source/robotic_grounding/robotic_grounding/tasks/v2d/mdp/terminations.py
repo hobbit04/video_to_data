@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import isaaclab.utils.math as math_utils
 import torch
+from isaaclab.managers import ManagerTermBase
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -113,6 +114,86 @@ def object_away_from_trajectory_z(
         - command.object_position_e[..., 2].squeeze()
     )
     return object_position_z_difference > threshold
+
+
+class ObjectLiftFailed(ManagerTermBase):
+    """Terminate when the demonstration has lifted the object and the policy has not.
+
+    ``object_away_from_trajectory`` asks how far the object is from the reference
+    pose, which on a short clip cannot tell "left the object on the table" from
+    "carried it with a few centimetres of hand-induced offset": the retargeted
+    grasp itself pushes the object 3-10 cm off the reference while holding it,
+    so any deviation budget tight enough to catch a non-lift also terminates
+    the demonstration. This term asks the task's own question instead.
+
+    Both lifts are measured above the object's height at reset, the same
+    baseline as the ``object_lift_*`` metrics, so the term is well defined under
+    random-frame resets and inert while the reference has not yet risen. The
+    reference side is *lagged* by ``lag_steps``: measured on the tissue-box
+    clip, the demonstration's own box starts rising 1-2 s after the reference
+    does and only then catches up (zero actions, VOC off, from frame 0: 71% of
+    envs are below 0.3 x reference the moment the reference passes 5 cm, 0% by
+    the time it passes 15 cm). Comparing the object's running-max rise against
+    the reference's running-max rise from ``lag_steps`` ago lets the
+    demonstration pass while a policy that never lifts is still cut short well
+    before the episode ends.
+
+    Off by default (``enabled=False`` returns all-False) so the shipped
+    configuration is unchanged; enable per run with
+    ``env.terminations.object_lift_failed.params.enabled=true``.
+    """
+
+    def __init__(self, cfg, env) -> None:
+        super().__init__(cfg, env)
+        self._lag = int(cfg.params.get("lag_steps", 40))
+        self._ref_hist = torch.zeros(env.num_envs, max(self._lag, 1), device=env.device)
+        self._ptr = 0
+        self._max_ref_lagged = torch.zeros(env.num_envs, device=env.device)
+
+    def reset(self, env_ids=None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        self._ref_hist[env_ids] = 0.0
+        self._max_ref_lagged[env_ids] = 0.0
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        command_name: str,
+        reference_lift_min: float = 0.05,
+        achieved_lift_ratio_min: float = 0.3,
+        lag_steps: int = 40,
+        enabled: bool = False,
+    ) -> torch.Tensor:
+        """
+        Args:
+            env: The environment instance.
+            command_name: The name of the command term.
+            reference_lift_min: The lagged reference must have risen at least
+                this far (metres, running max since reset) before the check applies.
+            achieved_lift_ratio_min: Terminate when the object's own running-max
+                rise is below this fraction of the lagged reference's.
+            lag_steps: How many env steps behind the reference the object is
+                allowed to be. Read once at construction.
+            enabled: Off by default so the shipped configuration is unchanged.
+
+        Returns:
+            Tensor of shape (num_envs,) indicating whether to terminate.
+        """
+        if not enabled:
+            return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        command = env.command_manager.get_term(command_name)
+        reference_lift_now = (
+            command.object_body_position_command_e[:, 0, 2] - command.reset_object_z
+        )
+        # Ring buffer: the slot being overwritten holds the value from lag_steps ago.
+        lagged = self._ref_hist[:, self._ptr].clone()
+        self._ref_hist[:, self._ptr] = reference_lift_now
+        self._ptr = (self._ptr + 1) % self._ref_hist.shape[1]
+        torch.maximum(self._max_ref_lagged, lagged, out=self._max_ref_lagged)
+        return (self._max_ref_lagged >= reference_lift_min) & (
+            command.max_achieved_lift < achieved_lift_ratio_min * self._max_ref_lagged
+        )
 
 
 #: Fraction of the reference motion's own extent used as the deviation budget
