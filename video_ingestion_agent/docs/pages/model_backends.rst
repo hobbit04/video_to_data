@@ -63,14 +63,27 @@ Architecture
 
 **Key design points:**
 
-- The ``ModelManager`` is a **singleton factory** that caches model instances by
-  ``(backend, model_name, device)`` so each model is loaded only once and shared across
-  pipeline components.
+- The ``ModelManager`` is a **singleton factory** that caches model instances by backend,
+  model, endpoint/device, and local multimodal pixel limits so compatible callers share one
+  load without silently reusing a processor configured for a different image resolution.
 - All three wrappers implement the same ``BaseModel`` interface (``generate_text``,
   ``generate_from_video``, ``generate_from_frames``), so callers (segmenter, critic, entity
   extractor) are backend-agnostic.
 - Convenience functions ``get_local_model()`` and ``get_api_model()`` are available for quick
   interactive use.
+
+For image-only tasks, pass already decoded PIL images through the same public interface:
+
+.. code-block:: python
+
+   from video_ingestion_agent.models import get_model_manager
+
+   model = get_model_manager().get_model(
+       "Qwen/Qwen3-VL-8B-Instruct",
+       backend="local",
+       mm_max_pixels=16 * 1024 * 1024,
+   )
+   result = model.generate_from_frames([image], "Describe the visible mark.")
 
 **Module:** :code_link:`<src/video_ingestion_agent/models/model_manager.py>`
 
@@ -319,7 +332,7 @@ No local GPU is required.
 
 1. ``APIModel`` sends a ``POST`` request to an OpenAI-compatible
    ``chat/completions`` endpoint. By default this is NVIDIA's internal
-   Inference API gateway (``https://inference-api.nvidia.com/v1/chat/completions``);
+   Inference API gateway (``https://api.example.com/v1/chat/completions``);
    set ``models.api_url`` to target a different gateway.
 2. For video input, the client extracts frames at ``vlm_fps``, encodes each as a base64 JPEG,
    and includes them as ``image_url`` content items alongside a text prompt that provides
